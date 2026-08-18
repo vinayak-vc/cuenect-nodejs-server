@@ -90,13 +90,13 @@ class Dashboard {
 
   addUser(username) {
     this.activeUsers.add(username);
-    this.log("JOIN", `Client connected: "${username}"`);
+    this.pushEvent("JOIN", `Client connected: "${username}"`);
     this.render();
   }
 
   removeUser(username) {
     this.activeUsers.delete(username);
-    this.log("LEAVE", `Client disconnected: "${username}"`);
+    this.pushEvent("LEAVE", `Client disconnected: "${username}"`);
     this.render();
   }
 
@@ -108,17 +108,20 @@ class Dashboard {
   incrementMessage(actionType = "RELAY", summary = "") {
     this.messageCount++;
     if (summary) {
-      this.log(actionType, summary);
+      this.pushEvent(actionType, summary);
     }
   }
 
-  log(category, message) {
+  pushEvent(category, message) {
     const time = new Date().toLocaleTimeString();
     this.events.unshift({ time, category: category.toUpperCase(), message });
     if (this.events.length > this.maxEvents) {
       this.events.pop();
     }
-    this.render();
+  }
+
+  log(category, message) {
+    this.pushEvent(category, message);
   }
 
   setAlert(type, title, description) {

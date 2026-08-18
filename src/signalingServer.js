@@ -1,8 +1,27 @@
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+const crypto = require("crypto");
 const { Server: SocketIOServer } = require("socket.io");
 const { getMachineIPAddresses } = require("./network");
+
+const RELAYABLE_EVENTS = new Set([
+  "hologram-asset-action",
+  "hologram-model-action",
+  "hologram-joystick-action",
+  "hologram-video-action",
+  "hologram-action",
+  "hologram-diya-action",
+  "hologram-audioSource-action",
+  "hologram-camera-orthographic-action",
+  "StereoSettingsActionKey",
+  "hologram-asset-list",
+  "hologram-asset-progress",
+  "qr-code",
+  "socket-disconnect",
+  "message",
+  "stage-message"
+]);
 
 class SignalingServer {
   constructor(port = 9000) {
@@ -11,6 +30,8 @@ class SignalingServer {
     this.io = null;
     this.publicTunnelUrl = null;
     this.activeSocketIOUsers = new Map();
+    this.roles = new Map();
+    this.stageSecret = crypto.randomBytes(16).toString("hex");
     this.dashboard = null;
     this.cachedAssets = null;
     this.loadLocalAssetDatabase();
@@ -144,18 +165,17 @@ class SignalingServer {
       const shortId = socket.id.substring(0, 5);
       const defaultName = `Client_${shortId}`;
       this.activeSocketIOUsers.set(socket.id, defaultName);
+      this.roles.set(socket.id, "controller");
       if (this.dashboard) {
         this.dashboard.addUser(defaultName);
       }
 
-      if (this.cachedAssets) {
-        socket.emit("hologram-asset-list", this.cachedAssets);
-        const assetStr = typeof this.cachedAssets === "string" ? this.cachedAssets : JSON.stringify(this.cachedAssets);
-        socket.emit("message", `SendingAssets#${assetStr}`);
-      }
-
       socket.on("login", (data) => {
         const username = (typeof data === "string" ? data : (data && data.name)) || defaultName;
+        const secret = (typeof data === "object" && data) ? data.secret : undefined;
+        const role = (secret === this.stageSecret || username === "Unity_Stage") ? "stage" : "controller";
+        this.roles.set(socket.id, role);
+
         if (this.dashboard && this.activeSocketIOUsers.has(socket.id)) {
           this.dashboard.removeUser(this.activeSocketIOUsers.get(socket.id));
         }
@@ -175,20 +195,28 @@ class SignalingServer {
           users: Array.from(this.activeSocketIOUsers.values())
         });
 
-        if (this.cachedAssets) {
+        // Deliver catalog only to authenticated controller sockets
+        if (role === "controller" && this.cachedAssets) {
           socket.emit("hologram-asset-list", this.cachedAssets);
           const assetStr = typeof this.cachedAssets === "string" ? this.cachedAssets : JSON.stringify(this.cachedAssets);
           socket.emit("message", `SendingAssets#${assetStr}`);
         }
       });
 
-      // Relay all stage events
+      // Relay only allowed stage events
       socket.onAny((eventName, ...args) => {
-        if (eventName === "login" || eventName === "disconnect") return;
+        if (!RELAYABLE_EVENTS.has(eventName)) {
+          if (eventName !== "login" && eventName !== "disconnect") {
+            if (this.dashboard) this.dashboard.log("WARN", `Dropped non-allowlisted event: "${eventName}"`);
+          }
+          return;
+        }
 
-        if (eventName === "hologram-asset-list") {
+        const isStage = this.roles.get(socket.id) === "stage";
+
+        if (isStage && eventName === "hologram-asset-list") {
           this.cachedAssets = args[0];
-        } else if (eventName === "message" && typeof args[0] === "string" && args[0].startsWith("SendingAssets#")) {
+        } else if (isStage && eventName === "message" && typeof args[0] === "string" && args[0].startsWith("SendingAssets#")) {
           try {
             const jsonPart = args[0].substring(args[0].indexOf("#") + 1);
             this.cachedAssets = JSON.parse(jsonPart);
@@ -247,6 +275,7 @@ class SignalingServer {
       socket.on("disconnect", (reason) => {
         const username = this.activeSocketIOUsers.get(socket.id);
         this.activeSocketIOUsers.delete(socket.id);
+        this.roles.delete(socket.id);
 
         if (this.dashboard && username) {
           this.dashboard.removeUser(username);
@@ -263,15 +292,29 @@ class SignalingServer {
   }
 
   stop() {
-    if (this.io) {
-      this.io.close();
-      this.io = null;
-    }
+    return new Promise((resolve) => {
+      let pending = 0;
+      const checkDone = () => {
+        pending--;
+        if (pending <= 0) resolve();
+      };
 
-    if (this.httpServer) {
-      this.httpServer.close();
-      this.httpServer = null;
-    }
+      if (this.io) {
+        pending++;
+        this.io.close(() => checkDone());
+        this.io = null;
+      }
+
+      if (this.httpServer) {
+        pending++;
+        this.httpServer.close(() => checkDone());
+        this.httpServer = null;
+      }
+
+      if (pending === 0) {
+        resolve();
+      }
+    });
   }
 }
 

@@ -3,7 +3,7 @@
  * Provides high-performance, non-blocking bidirectional relay between Unity Stage and Web/Mobile controllers.
  */
 
-const { config, readSavedToken } = require("./src/config");
+const { config, readSavedToken, applyTokenActions } = require("./src/config");
 const { getMachineIPAddresses } = require("./src/network");
 const { SignalingServer } = require("./src/signalingServer");
 const { TunnelManager } = require("./src/tunnelManager");
@@ -11,7 +11,10 @@ const { Dashboard } = require("./src/dashboard");
 const { disableWindowsQuickEdit } = require("./src/windowsConsole");
 
 async function main() {
-  // 0. Disable Windows Console QuickEdit mode to prevent process freeze on click/unfocus
+  // 0. Handle CLI action flags (help, clear-token, save-token) explicitly
+  applyTokenActions(config);
+
+  // 1. Disable Windows Console QuickEdit mode to prevent process freeze on click/unfocus
   disableWindowsQuickEdit();
 
   const localIps = getMachineIPAddresses();
@@ -60,7 +63,7 @@ async function main() {
 
     try {
       await tunnelManager.stop();
-      server.stop();
+      await server.stop();
       dashboard.stop();
       console.log("\n[Server] Stopped successfully.");
       process.exit(0);
@@ -77,6 +80,7 @@ async function main() {
   process.on("uncaughtException", (err) => {
     dashboard.setAlert("error", "UNCAUGHT ERROR", err.message || String(err));
     dashboard.log("ERROR", `Exception: ${err.message || err}`);
+    setTimeout(() => process.exit(1), 1500);
   });
 
   process.on("unhandledRejection", (reason) => {

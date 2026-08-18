@@ -11,7 +11,9 @@ const { execSync } = require("child_process");
 function disableWindowsQuickEdit() {
   if (process.platform !== "win32") return;
 
-  // 1. Ensure stdin is paused and unreferenced so it never blocks the event loop
+  // 1. Initial stdin unref. Note: Dashboard.setupKeyboardShortcuts() subsequently enables raw mode
+  // and listens for keyboard shortcuts (C, L, Ctrl+C). The Win32 SetConsoleMode call below is what
+  // permanently disables QuickEdit freezing regardless of stdin read state.
   try {
     if (process.stdin && typeof process.stdin.pause === "function") {
       process.stdin.pause();
