@@ -1,0 +1,37 @@
+{
+  "name": "cuenect-signaling-bridge",
+  "version": "2.0.0",
+  "description": "High-performance Socket.IO signaling relay bridge between Unity Stage and Web controllers",
+  "main": "server.js",
+  "bin": {
+    "cuenect-server": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "build-win": "pkg . --targets node18-win-x64 --output dist/cuenect-server.exe",
+    "build-all": "pkg . --targets node18-win-x64,node18-macos-x64,node18-macos-arm64 --output dist/cuenect-server"
+  },
+  "author": "",
+  "license": "ISC",
+  "pkg": {
+    "assets": [
+      "src/**/*",
+      "public/**/*",
+      "views/**/*",
+      "*.html",
+      "*.css"
+    ],
+    "targets": [
+      "node18-win-x64",
+      "node18-macos-x64",
+      "node18-macos-arm64"
+    ],
+    "outputPath": "dist"
+  },
+  "dependencies": {
+    "@ngrok/ngrok": "^1.5.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3"
+  }
+}
