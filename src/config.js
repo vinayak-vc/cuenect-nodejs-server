@@ -24,7 +24,7 @@ function parseArgs(args = process.argv.slice(2)) {
   const config = {
     port: resolvePort(process.env.PORT, "PORT environment variable") ?? 9000,
     ngrokToken: process.env.NGROK_AUTHTOKEN || null,
-    enableNgrok: false, // Default to secure local LAN mode
+    enableNgrok: true, // Default to auto-starting tunnel if token exists
     saveTokenRequested: false,
     clearTokenRequested: false,
     showHelp: false,
