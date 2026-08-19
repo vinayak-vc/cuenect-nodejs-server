@@ -39,7 +39,10 @@ class Dashboard {
   }
 
   generateQrCode() {
-    const targetUrl = this.publicUrl || `http://${this.localIps[0] || "127.0.0.1"}:${this.port}`;
+    const webBase = "https://cuenect-offline.netlify.app/";
+    const targetUrl = this.publicUrl
+      ? `${webBase}?server=${encodeURIComponent(this.publicUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:"))}`
+      : `${webBase}?host=${this.localIps[0] || "127.0.0.1"}&port=${this.port}&usePort=true`;
     try {
       qrcode.generate(targetUrl, { small: true }, (qr) => {
         this.qrLines = qr.split("\n").filter((l) => l.trim().length > 0);

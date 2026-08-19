@@ -37,6 +37,16 @@ class SignalingServer {
     this.loadLocalAssetDatabase();
   }
 
+  getWebConnectUrl() {
+    const webBase = "https://cuenect-offline.netlify.app/";
+    if (this.publicTunnelUrl) {
+      const socketUrl = this.publicTunnelUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+      return `${webBase}?server=${encodeURIComponent(socketUrl)}`;
+    }
+    const localIp = getMachineIPAddresses()[0] || "127.0.0.1";
+    return `${webBase}?host=${localIp}&port=${this.port}&usePort=true`;
+  }
+
   loadLocalAssetDatabase() {
     try {
       const userProfile = process.env.USERPROFILE || process.env.HOME || "";
@@ -46,8 +56,36 @@ class SignalingServer {
         if (raw && raw.trim()) {
           const parsed = JSON.parse(raw);
           this.cachedAssets = parsed;
+          return;
         }
       }
+
+      // Default fallback assets list for the 10 fixed clothing models
+      const defaultModels = [
+        { id: "1_Leather_Jacket", name: "Leather Jacket", file: "1_Leather_Jacket.glb" },
+        { id: "2_Materials_Variants_Shoe", name: "Materials Variants Shoe", file: "2_Materials_Variants_Shoe.glb" },
+        { id: "3_ReadyPlayerMe_Outfit", name: "ReadyPlayerMe Outfit", file: "3_ReadyPlayerMe_Outfit.glb" },
+        { id: "4_Vintage_Corset", name: "Vintage Corset", file: "4_Vintage_Corset.glb" },
+        { id: "5_Chronograph_Luxury_Watch", name: "Chronograph Luxury Watch", file: "5_Chronograph_Luxury_Watch.glb" },
+        { id: "6_Designer_Sunglasses", name: "Designer Sunglasses", file: "6_Designer_Sunglasses.glb" },
+        { id: "7_Michelle_Casual_Wear", name: "Michelle Casual Wear", file: "7_Michelle_Casual_Wear.glb" },
+        { id: "8_Venice_Carnival_Mask", name: "Venice Carnival Mask", file: "8_Venice_Carnival_Mask.glb" },
+        { id: "9_Military_Uniform_Soldier", name: "Military Uniform Soldier", file: "9_Military_Uniform_Soldier.glb" },
+        { id: "10_Suit_Cesium_Man", name: "Suit Cesium Man", file: "10_Suit_Cesium_Man.glb" }
+      ];
+
+      const generated = {
+        assetinformation: defaultModels.map((m) => ({
+          AssetID: m.id,
+          AssetName: m.name,
+          PlaylistName: "Clothing & Wearables",
+          ThumbnailImagePath: "#",
+          ModelPath: m.file,
+          Category: 0
+        }))
+      };
+
+      this.cachedAssets = generated;
     } catch (e) {}
   }
 
@@ -59,6 +97,11 @@ class SignalingServer {
     this.publicTunnelUrl = url;
     if (this.dashboard) {
       this.dashboard.setPublicUrl(url);
+    }
+    const connectUrl = this.getWebConnectUrl();
+    if (this.io) {
+      this.io.emit("qr-code", { action: "show", url: connectUrl });
+      this.io.emit("message", `QRCodeURL#${connectUrl}`);
     }
   }
 
@@ -200,6 +243,13 @@ class SignalingServer {
           socket.emit("hologram-asset-list", this.cachedAssets);
           const assetStr = typeof this.cachedAssets === "string" ? this.cachedAssets : JSON.stringify(this.cachedAssets);
           socket.emit("message", `SendingAssets#${assetStr}`);
+        }
+
+        // Deliver current QR connection URL to stage
+        if (role === "stage") {
+          const connectUrl = this.getWebConnectUrl();
+          socket.emit("qr-code", { action: "show", url: connectUrl });
+          socket.emit("message", `QRCodeURL#${connectUrl}`);
         }
       });
 
