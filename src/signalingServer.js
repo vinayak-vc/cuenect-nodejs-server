@@ -15,6 +15,7 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-audioSource-action",
   "hologram-camera-orthographic-action",
   "StereoSettingsActionKey",
+  "hologram-display-mode-action",
   "hologram-asset-list",
   "hologram-asset-progress",
   "qr-code",
@@ -304,6 +305,12 @@ class SignalingServer {
             }
             case "hologram-camera-orthographic-action": {
               this.dashboard.incrementMessage("CAMERA", `Orthographic toggle: ${payload.isOrthographic}`);
+              break;
+            }
+            case "hologram-display-mode-action": {
+              const modeLabels = ["2D", "Stereoscopic (SBS)", "HOLO Stereoscopic"];
+              const label = payload.modeName || modeLabels[payload.mode] || "unknown";
+              this.dashboard.incrementMessage("DISPLAY", `Display mode: ${label}`);
               break;
             }
             default:
