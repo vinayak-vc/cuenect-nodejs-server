@@ -16,6 +16,7 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-camera-orthographic-action",
   "StereoSettingsActionKey",
   "hologram-display-mode-action",
+  "control-lock-state",
   "hologram-asset-list",
   "hologram-asset-progress",
   "qr-code",
@@ -32,6 +33,9 @@ class SignalingServer {
     this.publicTunnelUrl = null;
     this.activeSocketIOUsers = new Map();
     this.roles = new Map();
+    // Socket id of the controller currently allowed to drive the stage. Null
+    // means the stage is unclaimed and the next controller command takes it.
+    this.controlHolder = null;
     this.stageSecret = crypto.randomBytes(16).toString("hex");
     this.dashboard = null;
     this.cachedAssets = null;
@@ -203,6 +207,65 @@ class SignalingServer {
     });
   }
 
+  /**
+   * A single operator should never have to ask themselves for permission.
+   * If exactly one controller is connected, it owns the stage - this also
+   * recovers the common case of reloading the page while a stale socket from
+   * the previous session still holds the lock.
+   */
+  claimIfSoleController() {
+    const controllers = [];
+    for (const [id, role] of this.roles.entries()) {
+      if (role === "controller") controllers.push(id);
+    }
+    if (controllers.length === 1) {
+      this.controlHolder = controllers[0];
+    }
+  }
+
+  /**
+   * Hand control to any remaining controller so the stage is never left
+   * unowned while an operator is connected.
+   */
+  promoteNextController() {
+    for (const [id, role] of this.roles.entries()) {
+      if (role === "controller") {
+        this.controlHolder = id;
+        return;
+      }
+    }
+  }
+
+  /**
+   * Tell every client who holds control. Each socket receives its own view so
+   * the client does not have to know its own socket id.
+   */
+  broadcastControlState() {
+    const holderName = this.controlHolder
+      ? this.activeSocketIOUsers.get(this.controlHolder) || null
+      : null;
+
+    const operators = [];
+    for (const [id, role] of this.roles.entries()) {
+      if (role !== "controller") continue;
+      operators.push({
+        name: this.activeSocketIOUsers.get(id) || "operator",
+        hasControl: id === this.controlHolder
+      });
+    }
+
+    for (const [id] of this.roles.entries()) {
+      const target = this.io.sockets.sockets.get(id);
+      if (!target) continue;
+      target.emit("control-lock-state", {
+        holderName,
+        youHaveControl: id === this.controlHolder,
+        locked: this.controlHolder !== null,
+        operators
+      });
+    }
+  }
+
   setupSocketIOEvents() {
     this.io.on("connection", (socket) => {
       const clientIp = socket.handshake.address || "127.0.0.1";
@@ -239,6 +302,14 @@ class SignalingServer {
           users: Array.from(this.activeSocketIOUsers.values())
         });
 
+        // First controller in owns the stage; later ones join as observers until
+        // they explicitly request control.
+        if (role === "controller" && this.controlHolder === null) {
+          this.controlHolder = socket.id;
+        }
+        this.claimIfSoleController();
+        this.broadcastControlState();
+
         // Deliver catalog only to authenticated controller sockets
         if (role === "controller" && this.cachedAssets) {
           socket.emit("hologram-asset-list", this.cachedAssets);
@@ -252,6 +323,31 @@ class SignalingServer {
           socket.emit("qr-code", { action: "show", url: connectUrl });
           socket.emit("message", `QRCodeURL#${connectUrl}`);
         }
+      });
+
+      // Control ownership: a single operator drives the stage at a time so two
+      // controllers cannot fight over the same model during a live show.
+      socket.on("control-request", () => {
+        if (this.roles.get(socket.id) !== "controller") return;
+        const previous = this.controlHolder;
+        this.controlHolder = socket.id;
+        if (this.dashboard) {
+          this.dashboard.incrementMessage(
+            "CONTROL",
+            `${this.activeSocketIOUsers.get(socket.id) || "operator"} took control` +
+              (previous && previous !== socket.id ? " (was " + (this.activeSocketIOUsers.get(previous) || "another operator") + ")" : "")
+          );
+        }
+        this.broadcastControlState();
+      });
+
+      socket.on("control-release", () => {
+        if (this.controlHolder !== socket.id) return;
+        this.controlHolder = null;
+        if (this.dashboard) {
+          this.dashboard.incrementMessage("CONTROL", `${this.activeSocketIOUsers.get(socket.id) || "operator"} released control`);
+        }
+        this.broadcastControlState();
       });
 
       // Relay only allowed stage events
@@ -333,6 +429,14 @@ class SignalingServer {
         const username = this.activeSocketIOUsers.get(socket.id);
         this.activeSocketIOUsers.delete(socket.id);
         this.roles.delete(socket.id);
+
+        // Never leave the stage locked to a socket that is gone.
+        if (this.controlHolder === socket.id) {
+          this.controlHolder = null;
+          this.promoteNextController();
+        }
+        this.claimIfSoleController();
+        this.broadcastControlState();
 
         if (this.dashboard && username) {
           this.dashboard.removeUser(username);
