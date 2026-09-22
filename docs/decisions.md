@@ -23,3 +23,9 @@
   1. Permit `ngrok-skip-browser-warning` and `*` in `Access-Control-Allow-Headers`.
   2. Implement an explicit 204 response on `OPTIONS` preflights with `Access-Control-Max-Age: 86400`.
   3. Send `ngrok-skip-browser-warning: true` header and URL query param from client loaders.
+
+## D-004: HTTP Browser Caching & Conditional 304 Validation
+- **Decision**: Added `Cache-Control: public, max-age=604800, stale-while-revalidate=86400`, `ETag` (based on file size and mtime), `Last-Modified`, and HTTP 304 Not Modified validation for `/api/model`.
+- **Rationale**:
+  - Without caching headers, mobile browsers and Three.js re-downloaded multi-megabyte GLB assets repeatedly, rapidly exhausting ngrok's 1 GB monthly outbound transfer quota.
+  - Adding standard HTTP caching headers allows clients to store the binary assets in local browser disk cache, achieving 0 bytes of network transfer on repeated views.

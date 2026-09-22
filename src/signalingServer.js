@@ -146,16 +146,16 @@ class SignalingServer {
         // Enable CORS
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, *");
-        res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, *");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, If-None-Match, If-Modified-Since, *");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, ETag, Last-Modified, Cache-Control, *");
         res.setHeader("Access-Control-Max-Age", "86400");
 
         if (req.method === "OPTIONS") {
           res.writeHead(204, {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, *",
-            "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, *",
+            "Access-Control-Allow-Headers": "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, If-None-Match, If-Modified-Since, *",
+            "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, ETag, Last-Modified, Cache-Control, *",
             "Access-Control-Max-Age": "86400"
           });
           res.end();
@@ -171,7 +171,8 @@ class SignalingServer {
               port: this.port,
               activeConnections: this.activeSocketIOUsers.size,
               uptimeSeconds: Math.round(process.uptime()),
-              publicUrl: this.publicTunnelUrl || null
+              publicUrl: this.publicTunnelUrl || null,
+              localIp: getMachineIPAddresses()[0] || "127.0.0.1"
             })
           );
           return;
@@ -230,6 +231,26 @@ class SignalingServer {
           }
 
           const fileSize = stat.size;
+          const etag = `W/"${fileSize}-${Math.floor(stat.mtimeMs)}"`;
+          const lastModified = stat.mtime.toUTCString();
+          const cacheControl = "public, max-age=604800, stale-while-revalidate=86400";
+
+          // Conditional GET check for 304 Not Modified
+          const ifNoneMatch = req.headers["if-none-match"];
+          const ifModifiedSince = req.headers["if-modified-since"];
+          if (
+            ifNoneMatch === etag ||
+            (ifModifiedSince && new Date(ifModifiedSince) >= stat.mtime)
+          ) {
+            res.writeHead(304, {
+              "ETag": etag,
+              "Last-Modified": lastModified,
+              "Cache-Control": cacheControl
+            });
+            res.end();
+            return;
+          }
+
           const range = req.headers.range;
 
           if (range) {
@@ -238,7 +259,11 @@ class SignalingServer {
             const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
             if (start >= fileSize || end >= fileSize) {
-              res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
+              res.writeHead(416, {
+                "Content-Range": `bytes */${fileSize}`,
+                "Cache-Control": cacheControl,
+                "ETag": etag
+              });
               res.end();
               return;
             }
@@ -249,14 +274,20 @@ class SignalingServer {
               "Content-Range": `bytes ${start}-${end}/${fileSize}`,
               "Accept-Ranges": "bytes",
               "Content-Length": chunksize,
-              "Content-Type": "model/gltf-binary"
+              "Content-Type": "model/gltf-binary",
+              "Cache-Control": cacheControl,
+              "ETag": etag,
+              "Last-Modified": lastModified
             });
             fileStream.pipe(res);
           } else {
             res.writeHead(200, {
               "Content-Length": fileSize,
               "Accept-Ranges": "bytes",
-              "Content-Type": "model/gltf-binary"
+              "Content-Type": "model/gltf-binary",
+              "Cache-Control": cacheControl,
+              "ETag": etag,
+              "Last-Modified": lastModified
             });
             if (req.method === "HEAD") {
               res.end();
@@ -419,7 +450,12 @@ class SignalingServer {
 
         socket.emit("login_response", {
           success: true,
-          users: Array.from(this.activeSocketIOUsers.values())
+          users: Array.from(this.activeSocketIOUsers.values()),
+          serverInfo: {
+            localIp: getMachineIPAddresses()[0] || "127.0.0.1",
+            port: this.port,
+            isTunnel: Boolean(this.publicTunnelUrl)
+          }
         });
 
         socket.broadcast.emit("user_joined", {

@@ -52,7 +52,17 @@ async function runTests() {
     assert.strictEqual(rangeRes.buffer.readUInt32LE(0), 0x46546c67, "First 4 bytes must be 'glTF' magic");
     console.log("  ✔ /api/model Range request returned 206 with correct 12-byte GLB header");
 
-    // 3d. Test 404 on missing file
+    // 3d. Test Cache-Control, ETag and 304 Not Modified
+    assert(headRes.headers["etag"], "HEAD should include ETag header");
+    assert(headRes.headers["cache-control"], "HEAD should include Cache-Control header");
+    const etag = headRes.headers["etag"];
+    const notModifiedRes = await fetchHead(`http://127.0.0.1:${testPort}/api/model?file=1_Leather_Jacket.glb`, {
+      "if-none-match": etag
+    });
+    assert.strictEqual(notModifiedRes.status, 304, "Conditional GET with matching ETag should return 304");
+    console.log("  ✔ /api/model ETag, Cache-Control and HTTP 304 caching verified");
+
+    // 3e. Test 404 on missing file
     const missingRes = await fetchJson(`http://127.0.0.1:${testPort}/api/model?file=not_there.glb`);
     assert.strictEqual(missingRes.status, 404, "Missing file should return 404");
     console.log("  ✔ /api/model 404 on missing file verified");
@@ -80,7 +90,7 @@ function fetchJson(url) {
   });
 }
 
-function fetchHead(url) {
+function fetchHead(url, customHeaders = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const req = http.request(
@@ -88,7 +98,8 @@ function fetchHead(url) {
         hostname: parsed.hostname,
         port: parsed.port,
         path: parsed.pathname + parsed.search,
-        method: "HEAD"
+        method: "HEAD",
+        headers: customHeaders
       },
       (res) => {
         resolve({ status: res.statusCode, headers: res.headers });
