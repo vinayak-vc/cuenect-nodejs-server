@@ -146,11 +146,18 @@ class SignalingServer {
         // Enable CORS
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
-        res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, *");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length, *");
+        res.setHeader("Access-Control-Max-Age", "86400");
 
         if (req.method === "OPTIONS") {
-          res.writeHead(204);
+          res.writeHead(204, {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, *",
+            "Access-Control-Expose-Headers": "Content-Range, Accept-Ranges, Content-Length, *",
+            "Access-Control-Max-Age": "86400"
+          });
           res.end();
           return;
         }

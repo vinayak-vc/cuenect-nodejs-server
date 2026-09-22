@@ -7,6 +7,7 @@
   - `GET /api/model-info?path=...`: returns model metadata and `isLoadable` flag.
   - `GET /api/model?path=...`: streams the GLB file with CORS and HTTP 206 `Range: bytes` support, with 413 rejection for models exceeding the threshold unless forced.
 - Enriched catalog assets on boot and during stage asset broadcasts (`hologram-asset-list` and `SendingAssets#`).
+- Enhanced CORS configuration in `signalingServer.js` to support `ngrok-skip-browser-warning` and wildcard preflights.
 - Created automated test suite `test/testGlbEndpoints.js` (all tests passing).
 - Added `docs/` per `AGENTS.md` §16.
 
