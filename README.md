@@ -16,7 +16,8 @@ High-performance, offline-first **Socket.IO** signaling relay bridge connecting 
 
 ## Features
 
-- **Unified Socket.IO Signaling**: Bi-directional event routing between Unity Desktop Stage and multi-client web controllers.
+- **Unified Socket.IO Signaling**: Bi-directional event routing between Unity Desktop Stage and multi-client web controllers, gated by an explicit `RELAYABLE_EVENTS` allowlist (anything else is dropped with a dashboard `WARN` - a new typed event must be added here as well as to the clients).
+- **Single-Operator Control Lock**: Arbitrates which controller may drive the stage (`control-request`, `control-release`, `control-lock-state`). First controller in owns the stage, a lone controller always owns it (so a page reload recovers control), and ownership passes on when the holder disconnects. Clients that never negotiate a lock keep working, so an older client is never locked out.
 - **Mid-Session Catalog Caching**: Automatically pre-loads and caches `Documents/Cuenect/CuenectDatabase.json` on boot, immediately streaming the asset library to late-joining web controllers without requiring Unity restarts.
 - **Live Terminal Dashboard**: Interactive terminal dashboard displaying live connection counts, packet statistics, active users, and error alerts.
 - **Auto-Pairing QR Code Generator**: Renders ANSI QR codes in the terminal for instant local Wi-Fi or public tunnel pairing.
