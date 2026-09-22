@@ -2,8 +2,32 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
+const { URL } = require("url");
 const { Server: SocketIOServer } = require("socket.io");
 const { getMachineIPAddresses } = require("./network");
+const { inspectGlb, resolveModelFilePath } = require("./glbInspector");
+
+/**
+ * Enriches catalog assets with GLB metadata (file size, triangle count, isWebPreviewable)
+ */
+function enrichAssetCatalog(catalog) {
+  if (!catalog || !Array.isArray(catalog.assetinformation)) return catalog;
+  for (const asset of catalog.assetinformation) {
+    const cat = asset.Category !== undefined ? Number(asset.Category) : 0;
+    if (cat === 0 && (asset.ModelPath || asset.AssetName)) {
+      const info = inspectGlb(asset.ModelPath || asset.AssetName);
+      asset.fileSizeBytes = info.fileSizeBytes;
+      asset.fileSizeMB = info.fileSizeMB;
+      asset.triangleCount = info.triangleCount;
+      asset.vertexCount = info.vertexCount;
+      asset.meshCount = info.meshCount;
+      asset.dimensions = info.dimensions;
+      asset.isWebPreviewable = info.isLoadable;
+      asset.rejectionReason = info.rejectionReason;
+    }
+  }
+  return catalog;
+}
 
 const RELAYABLE_EVENTS = new Set([
   "hologram-asset-action",
@@ -61,7 +85,7 @@ class SignalingServer {
         const raw = fs.readFileSync(dbPath, "utf-8");
         if (raw && raw.trim()) {
           const parsed = JSON.parse(raw);
-          this.cachedAssets = parsed;
+          this.cachedAssets = enrichAssetCatalog(parsed);
           return;
         }
       }
@@ -91,7 +115,7 @@ class SignalingServer {
         }))
       };
 
-      this.cachedAssets = generated;
+      this.cachedAssets = enrichAssetCatalog(generated);
     } catch (e) {}
   }
 
@@ -113,14 +137,17 @@ class SignalingServer {
 
   start() {
     return new Promise((resolve, reject) => {
-      // 1. Create HTTP server for health check & stats
+      // 1. Create HTTP server for health check & stats & model streaming
       this.httpServer = http.createServer((req, res) => {
-        const url = req.url || "/";
+        const parsedUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+        const pathname = parsedUrl.pathname;
+        const query = parsedUrl.searchParams;
 
         // Enable CORS
         res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length");
 
         if (req.method === "OPTIONS") {
           res.writeHead(204);
@@ -128,7 +155,7 @@ class SignalingServer {
           return;
         }
 
-        if (url === "/health" || url === "/status") {
+        if (pathname === "/health" || pathname === "/status") {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -140,6 +167,96 @@ class SignalingServer {
               publicUrl: this.publicTunnelUrl || null
             })
           );
+          return;
+        }
+
+        if (pathname === "/api/model-info") {
+          const modelParam = query.get("path") || query.get("file") || "";
+          if (!modelParam) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing 'path' or 'file' query parameter" }));
+            return;
+          }
+          const info = inspectGlb(modelParam);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(info));
+          return;
+        }
+
+        if (pathname === "/api/model") {
+          const modelParam = query.get("path") || query.get("file") || "";
+          if (!modelParam) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Missing 'path' or 'file' query parameter" }));
+            return;
+          }
+
+          const info = inspectGlb(modelParam);
+          if (!info.exists || !info.resolvedPath) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Model file not found on server", info }));
+            return;
+          }
+
+          const force = query.get("force") === "true";
+          if (!info.isLoadable && !force) {
+            res.writeHead(413, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify({
+                error: "Model exceeds web preview size or polycount threshold",
+                rejectionReason: info.rejectionReason,
+                fileSizeMB: info.fileSizeMB,
+                triangleCount: info.triangleCount
+              })
+            );
+            return;
+          }
+
+          const resolvedFile = info.resolvedPath;
+          let stat;
+          try {
+            stat = fs.statSync(resolvedFile);
+          } catch (err) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: `Failed to stat file: ${err.message}` }));
+            return;
+          }
+
+          const fileSize = stat.size;
+          const range = req.headers.range;
+
+          if (range) {
+            const parts = range.replace(/bytes=/, "").split("-");
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+            if (start >= fileSize || end >= fileSize) {
+              res.writeHead(416, { "Content-Range": `bytes */${fileSize}` });
+              res.end();
+              return;
+            }
+
+            const chunksize = end - start + 1;
+            const fileStream = fs.createReadStream(resolvedFile, { start, end });
+            res.writeHead(206, {
+              "Content-Range": `bytes ${start}-${end}/${fileSize}`,
+              "Accept-Ranges": "bytes",
+              "Content-Length": chunksize,
+              "Content-Type": "model/gltf-binary"
+            });
+            fileStream.pipe(res);
+          } else {
+            res.writeHead(200, {
+              "Content-Length": fileSize,
+              "Accept-Ranges": "bytes",
+              "Content-Type": "model/gltf-binary"
+            });
+            if (req.method === "HEAD") {
+              res.end();
+            } else {
+              fs.createReadStream(resolvedFile).pipe(res);
+            }
+          }
           return;
         }
 
@@ -363,11 +480,13 @@ class SignalingServer {
         const isStage = this.roles.get(socket.id) === "stage";
 
         if (isStage && eventName === "hologram-asset-list") {
-          this.cachedAssets = args[0];
+          this.cachedAssets = enrichAssetCatalog(args[0]);
+          args[0] = this.cachedAssets;
         } else if (isStage && eventName === "message" && typeof args[0] === "string" && args[0].startsWith("SendingAssets#")) {
           try {
             const jsonPart = args[0].substring(args[0].indexOf("#") + 1);
-            this.cachedAssets = JSON.parse(jsonPart);
+            this.cachedAssets = enrichAssetCatalog(JSON.parse(jsonPart));
+            args[0] = `SendingAssets#${JSON.stringify(this.cachedAssets)}`;
           } catch {}
         }
 
