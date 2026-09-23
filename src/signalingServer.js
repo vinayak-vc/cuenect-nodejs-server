@@ -633,7 +633,13 @@ class SignalingServer {
               break;
             }
             case "hologram-joystick-action": {
-              this.dashboard.incrementMessage("JOYSTICK", "D-Pad motion packet relayed");
+              const now = Date.now();
+              if (!this.lastJoystickLog || now - this.lastJoystickLog > 1000) {
+                this.lastJoystickLog = now;
+                this.dashboard.incrementMessage("JOYSTICK", "D-Pad motion active");
+              } else {
+                this.dashboard.incrementMessage();
+              }
               break;
             }
             case "hologram-video-action": {
@@ -665,7 +671,19 @@ class SignalingServer {
               break;
             }
             case "hologram-model-transform": {
-              this.dashboard.incrementMessage("TRANSFORM", `Pose: yaw=${Math.round(payload.yaw || 0)}° pitch=${Math.round(payload.pitch || 0)}° scale=${(payload.scale || 1).toFixed(2)}`);
+              const now = Date.now();
+              if (!this.lastTransformLog || now - this.lastTransformLog > 1000) {
+                this.lastTransformLog = now;
+                this.dashboard.incrementMessage("TRANSFORM", `Pose: yaw=${Math.round(payload.yaw || 0)}° pitch=${Math.round(payload.pitch || 0)}° scale=${(payload.scale || 1).toFixed(2)}`);
+              } else {
+                this.dashboard.incrementMessage();
+              }
+              break;
+            }
+            case "message":
+            case "ping":
+            case "pong": {
+              this.dashboard.incrementMessage();
               break;
             }
             default:

@@ -26,92 +26,138 @@ class Dashboard {
     this.startTime = Date.now();
     this.activeUsers = new Set();
     this.events = [];
-    this.maxEvents = 5;
+    this.maxEvents = 4;
     this.messageCount = 0;
     this.qrLines = [];
+    this.qrWidth = 35;
+    this.qrHeight = 18;
+    this.rightWidth = 36;
     this.alert = null;
-    this.clipboardNotice = null;
-    this.clipboardTimer = null;
-    this.renderTimer = null;
-    this.contentWidth = 76; // Inner width between borders
+    this.notice = null;
+    this.noticeTimer = null;
+    this.started = false;
+    this.uptimeTimer = null;
+    this.isFullRenderPending = true;
 
     this.generateQrCode();
   }
 
-  generateQrCode() {
+  getPrimaryLanIp() {
+    const first = this.localIps[0];
+    if (!first) return "127.0.0.1";
+    if (typeof first === "object") return first.address || first.ip || "127.0.0.1";
+    return first;
+  }
+
+  getWebConnectUrl() {
     const webBase = "https://cuenect-offline.netlify.app/";
-    const targetUrl = this.publicUrl
-      ? `${webBase}?server=${encodeURIComponent(this.publicUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:"))}`
-      : `${webBase}?host=${this.localIps[0] || "127.0.0.1"}&port=${this.port}&usePort=true`;
+    if (this.publicUrl) {
+      const socketUrl = this.publicUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
+      return `${webBase}?server=${encodeURIComponent(socketUrl)}`;
+    }
+    const localIp = this.getPrimaryLanIp();
+    return `${webBase}?host=${localIp}&port=${this.port}&usePort=true`;
+  }
+
+  generateQrCode() {
+    const targetUrl = this.getWebConnectUrl();
     try {
       qrcode.generate(targetUrl, { small: true }, (qr) => {
         this.qrLines = qr.split("\n").filter((l) => l.trim().length > 0);
       });
     } catch {
-      this.qrLines = ["  [QR Code Unavailable]  "];
+      this.qrLines = [];
     }
+
+    if (this.qrLines.length > 0) {
+      this.qrWidth = stripAnsi(this.qrLines[0]).length;
+      this.qrHeight = this.qrLines.length;
+    } else {
+      this.qrWidth = 35;
+      this.qrHeight = 18;
+      this.qrLines = Array(18).fill(" ".repeat(35));
+    }
+
+    // Keep total width <= 78 so it never wraps on 80-col terminals
+    this.rightWidth = Math.max(34, 78 - this.qrWidth - 3);
   }
 
   getPrimaryLanUrl() {
-    return `http://${this.localIps[0] || "127.0.0.1"}:${this.port}`;
+    return `http://${this.getPrimaryLanIp()}:${this.port}`;
   }
 
   setPublicUrl(url) {
     this.publicUrl = url;
     this.generateQrCode();
     copyToClipboard(url);
-    this.flashClipboardNotice("Public Cloud URL copied to clipboard (Ctrl+V)");
-    this.log("TUNNEL", `Cloud tunnel: ${url}`);
-    this.render();
+    this.flashNotice(`Cloud URL active & copied (Ctrl+V)`);
+    this.pushEvent("TUNNEL", `Cloud tunnel: ${url}`);
+    if (process.stdout.isTTY && this.started) {
+      this.renderFull();
+    }
   }
 
-  flashClipboardNotice(msg) {
-    this.clipboardNotice = msg;
-    if (this.clipboardTimer) clearTimeout(this.clipboardTimer);
-    this.clipboardTimer = setTimeout(() => {
-      this.clipboardNotice = null;
-      this.render();
+  flashNotice(msg) {
+    this.notice = msg;
+    if (this.noticeTimer) clearTimeout(this.noticeTimer);
+    if (process.stdout.isTTY && this.started) {
+      this.updateFooter();
+    }
+    this.noticeTimer = setTimeout(() => {
+      this.notice = null;
+      if (process.stdout.isTTY && this.started) {
+        this.updateFooter();
+      }
     }, 4000);
   }
 
   copyCloudUrl() {
     if (this.publicUrl) {
       copyToClipboard(this.publicUrl);
-      this.flashClipboardNotice(`Copied Cloud URL: ${this.publicUrl}`);
+      this.flashNotice(`Copied Cloud URL: ${this.publicUrl}`);
     } else {
-      this.flashClipboardNotice("No Cloud URL active. Local LAN only.");
+      this.flashNotice("No Cloud URL active. Local LAN only.");
     }
-    this.render();
   }
 
   copyLanUrl() {
     const lanUrl = this.getPrimaryLanUrl();
     copyToClipboard(lanUrl);
-    this.flashClipboardNotice(`Copied LAN URL: ${lanUrl}`);
-    this.render();
+    this.flashNotice(`Copied LAN URL: ${lanUrl}`);
   }
 
   addUser(username) {
     this.activeUsers.add(username);
-    this.pushEvent("JOIN", `Client connected: "${username}"`);
-    this.render();
+    this.pushEvent("JOIN", `Client: "${username}"`);
+    if (process.stdout.isTTY && !this.isFullRenderPending) {
+      this.updateMetrics();
+      this.updateSessions();
+    }
   }
 
   removeUser(username) {
     this.activeUsers.delete(username);
-    this.pushEvent("LEAVE", `Client disconnected: "${username}"`);
-    this.render();
+    this.pushEvent("LEAVE", `Client left: "${username}"`);
+    if (process.stdout.isTTY && !this.isFullRenderPending) {
+      this.updateMetrics();
+      this.updateSessions();
+    }
   }
 
   setUsers(usersList) {
     this.activeUsers = new Set(usersList);
-    this.render();
+    if (process.stdout.isTTY && !this.isFullRenderPending) {
+      this.updateMetrics();
+      this.updateSessions();
+    }
   }
 
   incrementMessage(actionType = "RELAY", summary = "") {
     this.messageCount++;
     if (summary) {
       this.pushEvent(actionType, summary);
+    } else if (process.stdout.isTTY && !this.isFullRenderPending) {
+      this.updateMetrics();
     }
   }
 
@@ -121,6 +167,12 @@ class Dashboard {
     if (this.events.length > this.maxEvents) {
       this.events.pop();
     }
+
+    if (process.stdout.isTTY && this.started) {
+      this.updateFeed();
+    } else if (!process.stdout.isTTY) {
+      console.log(`${time} [${category.toUpperCase()}] ${message}`);
+    }
   }
 
   log(category, message) {
@@ -129,12 +181,18 @@ class Dashboard {
 
   setAlert(type, title, description) {
     this.alert = { type, title, description, time: new Date().toLocaleTimeString() };
-    this.render();
+    if (process.stdout.isTTY && this.started) {
+      this.renderFull();
+    } else if (!process.stdout.isTTY) {
+      console.error(`[ALERT ${type.toUpperCase()}] ${title}: ${description}`);
+    }
   }
 
   clearAlert() {
     this.alert = null;
-    this.render();
+    if (process.stdout.isTTY && this.started) {
+      this.renderFull();
+    }
   }
 
   getUptimeString() {
@@ -145,26 +203,190 @@ class Dashboard {
     return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
   }
 
-  start() {
-    // Set console title
-    if (process.stdout.isTTY) {
-      process.stdout.write("\x1b]0;Cuenect Hologram Stage Bridge Server v2.1\x07");
-      process.stdout.write("\x1b[?25l");
+  pad(str, targetLen) {
+    const len = stripAnsi(str).length;
+    if (len >= targetLen) return str;
+    return str + " ".repeat(targetLen - len);
+  }
+
+  truncate(str, maxLen) {
+    const stripped = stripAnsi(str);
+    if (stripped.length <= maxLen) return str;
+    return stripped.slice(0, maxLen - 1) + "…";
+  }
+
+  getRightCol() {
+    // 1-indexed column where right panel starts: qrWidth + 3 (' │ ') + 1
+    return this.qrWidth + 4;
+  }
+
+  /* ─────────────────────────────────────────────────────────────
+   * Micro-Updates: Updates only individual fields in-place
+   * ZERO screen clearing, ZERO duplicate blocks in scrollback
+   * ───────────────────────────────────────────────────────────── */
+
+  updateUptime() {
+    if (!process.stdout.isTTY || this.isFullRenderPending) return;
+    const uptime = this.getUptimeString();
+    const rightCol = this.getRightCol();
+    // Row 4: Port: XXXX      Uptime: 00:00:00
+    // "Port: 9000".length = 10 + 6 spaces = 16 chars from rightCol
+    const uptimeCol = rightCol + 18;
+    process.stdout.write(`\x1b[4;${uptimeCol}H\x1b[1;33m${uptime}\x1b[0m`);
+  }
+
+  updateMetrics() {
+    if (!process.stdout.isTTY || this.isFullRenderPending) return;
+    const userCount = this.activeUsers.size;
+    const rightCol = this.getRightCol();
+    // Row 5: Clients: X      Relayed: Y
+    const clientsCol = rightCol + 9;
+    const relayedCol = rightCol + 23;
+    process.stdout.write(`\x1b[5;${clientsCol}H\x1b[1;32m${userCount}\x1b[0m   `);
+    process.stdout.write(`\x1b[5;${relayedCol}H\x1b[1m${this.messageCount}\x1b[0m     `);
+  }
+
+  updateSessions() {
+    if (!process.stdout.isTTY || this.isFullRenderPending) return;
+    const rightCol = this.getRightCol();
+    const usersArr = Array.from(this.activeUsers);
+    let sessionsText = "";
+    if (usersArr.length === 0) {
+      sessionsText = "\x1b[90mWaiting for connections...\x1b[0m";
+    } else {
+      sessionsText = usersArr.slice(0, 2).map((u) => `\x1b[32m✔\x1b[0m ${this.truncate(u, 12)}`).join(" ");
+    }
+    // Row 12
+    process.stdout.write(`\x1b[12;${rightCol}H${this.pad(sessionsText, this.rightWidth)}\x1b[K`);
+  }
+
+  updateFeed() {
+    if (!process.stdout.isTTY || this.isFullRenderPending) return;
+    const rightCol = this.getRightCol();
+    // Rows 15 to 18
+    for (let i = 0; i < 4; i++) {
+      const row = 15 + i;
+      const ev = this.events[i];
+      let lineText = "\x1b[90m---\x1b[0m";
+      if (ev) {
+        let tagColor = "\x1b[36m";
+        if (ev.category === "ERROR") tagColor = "\x1b[1;31m";
+        else if (ev.category === "JOIN" || ev.category === "STAGE") tagColor = "\x1b[1;32m";
+        else if (ev.category === "MODEL" || ev.category === "STEREO") tagColor = "\x1b[1;35m";
+        else if (ev.category === "WARN" || ev.category === "JOYSTICK") tagColor = "\x1b[1;33m";
+
+        const text = `${ev.time} ${tagColor}[${ev.category}]\x1b[0m ${ev.message}`;
+        lineText = this.truncate(text, this.rightWidth);
+      }
+      process.stdout.write(`\x1b[${row};${rightCol}H${this.pad(lineText, this.rightWidth)}\x1b[K`);
+    }
+  }
+
+  updateFooter() {
+    if (!process.stdout.isTTY || this.isFullRenderPending) return;
+    const totalW = this.qrWidth + 3 + this.rightWidth;
+    let footerText = `Shortcuts: \x1b[1;32m[C]\x1b[0m Copy Cloud  │  \x1b[1;36m[L]\x1b[0m Copy LAN  │  \x1b[90m[Ctrl+C] Exit\x1b[0m`;
+    if (this.notice) {
+      footerText = `\x1b[1;42;30m ✔ ${this.notice} \x1b[0m`;
+    }
+    const footerRow = this.qrHeight + 2;
+    process.stdout.write(`\x1b[${footerRow};1H${this.pad(footerText, totalW)}\x1b[K`);
+  }
+
+  /* ─────────────────────────────────────────────────────────────
+   * Full Render: Compact 20-22 lines total, fits in any terminal
+   * Always drawn from \x1b[H without \x1b[2J so no duplicate blocks
+   * ───────────────────────────────────────────────────────────── */
+
+  render() {
+    this.renderFull();
+  }
+
+  renderFull() {
+    if (!process.stdout.isTTY) return;
+
+    const qrW = this.qrWidth;
+    const rW = this.rightWidth;
+    const sep = " │ ";
+
+    const uptime = this.getUptimeString();
+    const userCount = this.activeUsers.size;
+    const usersArr = Array.from(this.activeUsers);
+    const lanUrl = `http://${this.getPrimaryLanIp()}:${this.port}`;
+    const cloudUrl = this.publicUrl || "(None - use --token)";
+
+    let sessionsText = "";
+    if (usersArr.length === 0) {
+      sessionsText = "\x1b[90mWaiting for connections...\x1b[0m";
+    } else {
+      sessionsText = usersArr.slice(0, 2).map((u) => `\x1b[32m✔\x1b[0m ${this.truncate(u, 12)}`).join(" ");
     }
 
-    // Auto-copy local LAN URL if no public URL initially
-    if (!this.publicUrl) {
-      copyToClipboard(this.getPrimaryLanUrl());
-      this.flashClipboardNotice("LAN URL copied to clipboard (Ctrl+V)");
+    const rightLines = [
+      this.pad(`\x1b[1;36mCUENECT HOLOGRAM BRIDGE v2.1\x1b[0m`, rW),
+      this.pad(`\x1b[90mEngine:\x1b[0m Unity + WebGL  \x1b[1;32m● ONLINE\x1b[0m`, rW),
+      "─".repeat(rW),
+      this.pad(`Port: \x1b[1m${this.port}\x1b[0m      Uptime: \x1b[1;33m${uptime}\x1b[0m`, rW),
+      this.pad(`Clients: \x1b[1;32m${userCount}\x1b[0m     Relayed: \x1b[1m${this.messageCount}\x1b[0m`, rW),
+      "─".repeat(rW),
+      this.pad(`\x1b[1;33m[NETWORK ENDPOINTS]\x1b[0m`, rW),
+      this.pad(`LAN  : \x1b[36m${this.truncate(lanUrl, rW - 7)}\x1b[0m`, rW),
+      this.pad(`Cloud: \x1b[32m${this.truncate(cloudUrl, rW - 7)}\x1b[0m`, rW),
+      "─".repeat(rW),
+      this.pad(`\x1b[1;33m[CONNECTED SESSIONS]\x1b[0m`, rW),
+      this.pad(sessionsText, rW),
+      "─".repeat(rW),
+      this.pad(`\x1b[1;33m[ACTIVITY FEED]\x1b[0m`, rW)
+    ];
+
+    // Activity feed: 4 lines (rows 15 to 18)
+    for (let i = 0; i < 4; i++) {
+      const ev = this.events[i];
+      if (ev) {
+        let tagColor = "\x1b[36m";
+        if (ev.category === "ERROR") tagColor = "\x1b[1;31m";
+        else if (ev.category === "JOIN" || ev.category === "STAGE") tagColor = "\x1b[1;32m";
+        else if (ev.category === "MODEL" || ev.category === "STEREO") tagColor = "\x1b[1;35m";
+        else if (ev.category === "WARN" || ev.category === "JOYSTICK") tagColor = "\x1b[1;33m";
+
+        const text = `${ev.time} ${tagColor}[${ev.category}]\x1b[0m ${ev.message}`;
+        rightLines.push(this.pad(this.truncate(text, rW), rW));
+      } else {
+        rightLines.push(this.pad("\x1b[90m---\x1b[0m", rW));
+      }
     }
 
-    // Non-blocking keyboard shortcuts [C] and [L]
-    this.setupKeyboardShortcuts();
+    // Pad rightLines to match qrHeight
+    while (rightLines.length < this.qrHeight) {
+      if (this.alert && rightLines.length === this.qrHeight - 1) {
+        const alertTag = this.alert.type === "error" ? "\x1b[1;41;37m" : "\x1b[1;43;30m";
+        rightLines.push(this.pad(`${alertTag} ${this.alert.title} \x1b[0m`, rW));
+      } else {
+        rightLines.push(" ".repeat(rW));
+      }
+    }
 
-    this.render();
-    this.renderTimer = setInterval(() => {
-      this.render();
-    }, 1000);
+    const maxRows = Math.max(this.qrHeight, rightLines.length);
+    const out = [];
+    out.push("\x1b[H"); // Cursor Home - Overwrites in place without scrolling
+
+    for (let i = 0; i < maxRows; i++) {
+      const q = this.qrLines[i] || " ".repeat(qrW);
+      const r = rightLines[i] || " ".repeat(rW);
+      out.push(q + sep + r + "\x1b[K");
+    }
+
+    const totalW = qrW + sep.length + rW;
+    out.push("─".repeat(totalW) + "\x1b[K");
+
+    let footer = `Shortcuts: \x1b[1;32m[C]\x1b[0m Copy Cloud  │  \x1b[1;36m[L]\x1b[0m Copy LAN  │  \x1b[90m[Ctrl+C] Exit\x1b[0m`;
+    if (this.notice) {
+      footer = `\x1b[1;42;30m ✔ ${this.notice} \x1b[0m`;
+    }
+    out.push(this.pad(footer, totalW) + "\x1b[K");
+
+    process.stdout.write(out.join("\n") + "\n");
+    this.isFullRenderPending = false;
   }
 
   setupKeyboardShortcuts() {
@@ -191,166 +413,45 @@ class Dashboard {
     }
   }
 
-  stop() {
-    if (this.renderTimer) {
-      clearInterval(this.renderTimer);
-      this.renderTimer = null;
-    }
+  start() {
+    if (this.started) return;
+    this.started = true;
+
+    const lanUrl = this.getPrimaryLanUrl();
+    copyToClipboard(lanUrl);
+
     if (process.stdout.isTTY) {
-      process.stdout.write("\x1b[?25h");
+      process.stdout.write("\x1b]0;Cuenect Hologram Stage Bridge Server v2.1\x07");
+      // Clear viewport and scrollback ONCE at initial launch
+      process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+
+      // Setup non-blocking [C] and [L] shortcuts
+      this.setupKeyboardShortcuts();
+
+      // Initial full render
+      this.renderFull();
+
+      // 1-second interval ONLY updates the 8 characters of uptime in-place!
+      // It NEVER reprints the full block!
+      this.uptimeTimer = setInterval(() => {
+        this.updateUptime();
+      }, 1000);
+    } else {
+      console.log(`[SYS] Cuenect Bridge Server started on port ${this.port}`);
+      console.log(`[SYS] Local LAN: ${lanUrl}`);
     }
   }
 
-  formatRow(content) {
-    const visibleLength = stripAnsi(content).length;
-    const padding = Math.max(0, this.contentWidth - visibleLength);
-    return `║ ${content}${" ".repeat(padding)} ║`;
-  }
-
-  render() {
-    const out = [];
-    out.push("\x1b[H\x1b[2J");
-
-    const w = this.contentWidth;
-    const border = "═".repeat(w + 2);
-    const line = "─".repeat(w + 2);
-
-    // 1. Header with Holographic Crystal Logo
-    const c1 = "\x1b[38;5;51m"; // neon cyan
-    const c2 = "\x1b[38;5;45m"; // cyan-blue
-    const c3 = "\x1b[38;5;39m"; // deep sky blue
-    const reset = "\x1b[0m";
-    const bold = "\x1b[1m";
-    const green = "\x1b[1;32m";
-
-    out.push(`╔${border}╗`);
-    out.push(
-      this.formatRow(
-        `${c1}       /\\       ${reset}${bold}${c1}CUENECT HOLOGRAM STAGE BRIDGE v2.1${reset}   ${green}● ONLINE (Port ${this.port})${reset}`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c2}      /  \\      ${reset}\x1b[96m3D Spatial Display & Signaling Relay${reset}`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c2}     / /\\ \\     ${reset}\x1b[90mEngine: \x1b[36mUnity 3D + WebGL  │  \x1b[90mStage: \x1b[37mHologram Viewer${reset}`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c3}    <  \\/  >    ${reset}\x1b[90mState: \x1b[32mActive Stage Bridge Ready${reset}`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c3}     \\    /     ${reset}\x1b[90mRelay: \x1b[35mSocket.IO v4 (Zero-Latency Relay)\x1b[0m`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c2}      \\  /      ${reset}\x1b[90mSecurity: \x1b[36mStage Session Lock Active\x1b[0m`
-      )
-    );
-    out.push(
-      this.formatRow(
-        `${c1}       \\/       ${reset}\x1b[90mPress \x1b[1m[L]\x1b[0;90m Copy LAN  │  Press \x1b[1m[C]\x1b[0;90m Copy Cloud Link\x1b[0m`
-      )
-    );
-    out.push(`╠${border}╣`);
-
-    // 2. Metrics Bar
-    const uptime = this.getUptimeString();
-    const userCount = this.activeUsers.size;
-    out.push(
-      this.formatRow(
-        `Uptime: \x1b[1m${uptime}\x1b[0m  │  Clients: \x1b[1;32m${userCount}\x1b[0m  │  Messages Relayed: \x1b[1m${this.messageCount}\x1b[0m`
-      )
-    );
-    out.push(`╟${line}╢`);
-
-    // 3. Network Endpoints
-    out.push(this.formatRow(`\x1b[1;33m[NETWORK ENDPOINTS]\x1b[0m`));
-    out.push(this.formatRow(`Local LAN   : \x1b[1;36m${this.getPrimaryLanUrl()}\x1b[0m`));
-    if (this.publicUrl) {
-      out.push(this.formatRow(`Public Cloud: \x1b[1;32m${this.publicUrl}\x1b[0m`));
-    } else {
-      out.push(this.formatRow(`Public Cloud: \x1b[90m(None - use --token <ngrok_token> for cloud link)\x1b[0m`));
+  stop() {
+    if (this.uptimeTimer) {
+      clearInterval(this.uptimeTimer);
+      this.uptimeTimer = null;
     }
-    out.push(this.formatRow(`Protocols   : \x1b[35mSocket.IO v4\x1b[0m & \x1b[35mWebSocket (Port ${this.port})\x1b[0m`));
-    out.push(`╟${line}╢`);
-
-    // 4. Clipboard Notice (if active)
-    if (this.clipboardNotice) {
-      out.push(this.formatRow(`\x1b[1;42;30m 📋 ${this.clipboardNotice} \x1b[0m`));
-      out.push(`╟${line}╢`);
+    if (this.noticeTimer) {
+      clearTimeout(this.noticeTimer);
+      this.noticeTimer = null;
     }
-
-    // 5. QR Code & Connected Sessions (Side by Side)
-    out.push(
-      this.formatRow(
-        `\x1b[1;33m[SCAN QR TO CONNECT]\x1b[0m                  \x1b[1;33m[CONNECTED SESSIONS]\x1b[0m`
-      )
-    );
-
-    const usersArr = Array.from(this.activeUsers);
-    const maxRows = Math.max(this.qrLines.length, 6);
-
-    for (let i = 0; i < maxRows; i++) {
-      const rawQr = this.qrLines[i] || "";
-      const qrLen = stripAnsi(rawQr).length;
-      const qrPadded = rawQr + " ".repeat(Math.max(0, 36 - qrLen));
-
-      let userCol = "";
-      if (i === 0 && usersArr.length === 0) {
-        userCol = "\x1b[90mWaiting for Stage & Web App...\x1b[0m";
-      } else if (i < usersArr.length) {
-        userCol = `\x1b[32m✔\x1b[0m ${usersArr[i]}`;
-      }
-
-      const combined = `${qrPadded} │ ${userCol}`;
-      out.push(this.formatRow(combined));
-    }
-
-    out.push(`╟${line}╢`);
-
-    // 6. Alert Box (If any)
-    if (this.alert) {
-      const alertColor = this.alert.type === "error" ? "\x1b[1;41;37m" : "\x1b[1;43;30m";
-      out.push(this.formatRow(`${alertColor} ALERT: ${this.alert.title} \x1b[0m`));
-      out.push(this.formatRow(`  ${this.alert.description}`));
-      out.push(`╟${line}╢`);
-    }
-
-    // 7. Live Activity Feed
-    out.push(this.formatRow(`\x1b[1;33m[LIVE ACTIVITY FEED]\x1b[0m`));
-    if (this.events.length === 0) {
-      out.push(this.formatRow(`  \x1b[90mNo events recorded yet. Ready for incoming commands...\x1b[0m`));
-    } else {
-      for (const ev of this.events) {
-        let tagColor = "\x1b[36m";
-        if (ev.category === "ERROR") tagColor = "\x1b[1;31m";
-        if (ev.category === "JOIN" || ev.category === "STAGE") tagColor = "\x1b[1;32m";
-        if (ev.category === "MODEL" || ev.category === "STEREO") tagColor = "\x1b[1;35m";
-        if (ev.category === "WARN") tagColor = "\x1b[1;33m";
-
-        const logLine = `  \x1b[90m${ev.time}\x1b[0m ${tagColor}[${ev.category}]\x1b[0m ${ev.message}`;
-        out.push(this.formatRow(logLine));
-      }
-    }
-
-    // 8. Footer Box
-    out.push(`╚${border}╝`);
-    out.push(` \x1b[1mShortcuts:\x1b[0m Press \x1b[1;32m[C]\x1b[0m Copy Cloud URL  │  Press \x1b[1;36m[L]\x1b[0m Copy LAN URL  │  \x1b[90m[Ctrl+C] Exit\x1b[0m`);
-    if (this.publicUrl) {
-      out.push(` \x1b[90mCloud URL: ${this.publicUrl}\x1b[0m`);
-    } else {
-      out.push(` \x1b[90mLAN URL  : ${this.getPrimaryLanUrl()}\x1b[0m`);
-    }
-
-    process.stdout.write(out.join("\n") + "\n");
+    this.started = false;
   }
 }
 
