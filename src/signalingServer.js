@@ -205,6 +205,37 @@ class SignalingServer {
           return;
         }
 
+        // Static favicon and icon endpoints
+        if (
+          pathname === "/favicon.ico" ||
+          pathname === "/favicon.png" ||
+          pathname === "/favicon-32x32.png" ||
+          pathname === "/favicon-16x16.png" ||
+          pathname === "/favicon.svg" ||
+          pathname === "/logo.png" ||
+          pathname === "/icon-192.png" ||
+          pathname === "/icon-512.png" ||
+          pathname === "/apple-touch-icon.png"
+        ) {
+          const publicDir = path.join(__dirname, "..", "public");
+          const fileName = pathname.slice(1);
+          const filePath = path.join(publicDir, fileName);
+          if (fs.existsSync(filePath)) {
+            const ext = path.extname(fileName).toLowerCase();
+            const mimeTypes = {
+              ".ico": "image/x-icon",
+              ".png": "image/png",
+              ".svg": "image/svg+xml"
+            };
+            res.writeHead(200, {
+              "Content-Type": mimeTypes[ext] || "image/png",
+              "Cache-Control": "public, max-age=86400"
+            });
+            fs.createReadStream(filePath).pipe(res);
+            return;
+          }
+        }
+
         if (pathname === "/api/connection-info") {
           const ips = getMachineIPAddresses();
           const localIp = ips[0] || "127.0.0.1";
@@ -349,17 +380,22 @@ class SignalingServer {
           <html>
           <head>
             <title>Cuenect Hologram Stage Bridge</title>
+            <link rel="icon" type="image/x-icon" href="/favicon.ico">
+            <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+            <link rel="apple-touch-icon" href="/apple-touch-icon.png">
             <style>
-              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0f19; color: #fff; text-align: center; padding: 40px 20px; }
-              .card { background: #131b2e; border: 1px solid #1f2d4d; border-radius: 12px; max-width: 480px; margin: 0 auto; padding: 24px; }
-              h1 { color: #00e5ff; font-size: 1.4rem; margin-bottom: 8px; }
-              .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; background: rgba(34, 197, 94, 0.15); color: #22c55e; font-weight: 600; font-size: 0.85rem; }
-              .info { text-align: left; background: #070a12; padding: 12px; border-radius: 8px; margin-top: 16px; font-family: monospace; font-size: 0.85rem; color: #94a3b8; }
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #070a13; color: #fff; text-align: center; padding: 40px 20px; }
+              .card { background: #0d1222; border: 1px solid #1f2d4d; border-radius: 16px; max-width: 480px; margin: 0 auto; padding: 32px 24px; box-shadow: 0 12px 40px rgba(0,0,0,0.6); }
+              .logo { width: 84px; height: 84px; margin-bottom: 8px; filter: drop-shadow(0 0 16px rgba(0, 229, 255, 0.5)); }
+              h1 { color: #00e5ff; font-size: 1.4rem; margin: 8px 0 12px 0; letter-spacing: 0.05em; }
+              .badge { display: inline-block; padding: 4px 14px; border-radius: 20px; background: rgba(34, 197, 94, 0.15); color: #22c55e; font-weight: 600; font-size: 0.85rem; }
+              .info { text-align: left; background: #05070e; padding: 14px; border-radius: 10px; margin-top: 20px; font-family: monospace; font-size: 0.85rem; color: #94a3b8; border: 1px solid #162035; }
             </style>
           </head>
           <body>
             <div class="card">
-              <h1>Cuenect Hologram Stage Server</h1>
+              <img src="/favicon.png" alt="Cuenect Hologram Stage" class="logo" />
+              <h1>CUENECT STAGE BRIDGE</h1>
               <div class="badge">● Online (Port ${this.port})</div>
               <div class="info">
                 Active Connections: ${this.activeSocketIOUsers.size}<br>

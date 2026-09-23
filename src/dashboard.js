@@ -215,11 +215,48 @@ class Dashboard {
     const border = "═".repeat(w + 2);
     const line = "─".repeat(w + 2);
 
-    // 1. Header
+    // 1. Header with Holographic Crystal Logo
+    const c1 = "\x1b[38;5;51m"; // neon cyan
+    const c2 = "\x1b[38;5;45m"; // cyan-blue
+    const c3 = "\x1b[38;5;39m"; // deep sky blue
+    const reset = "\x1b[0m";
+    const bold = "\x1b[1m";
+    const green = "\x1b[1;32m";
+
     out.push(`╔${border}╗`);
     out.push(
       this.formatRow(
-        `\x1b[1;36mCUENECT HOLOGRAM STAGE BRIDGE v2.1\x1b[0m                \x1b[1;32m● ONLINE (Port ${this.port})\x1b[0m`
+        `${c1}       /\\       ${reset}${bold}${c1}CUENECT HOLOGRAM STAGE BRIDGE v2.1${reset}   ${green}● ONLINE (Port ${this.port})${reset}`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c2}      /  \\      ${reset}\x1b[96m3D Spatial Display & Signaling Relay${reset}`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c2}     / /\\ \\     ${reset}\x1b[90mEngine: \x1b[36mUnity 3D + WebGL  │  \x1b[90mStage: \x1b[37mHologram Viewer${reset}`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c3}    <  \\/  >    ${reset}\x1b[90mState: \x1b[32mActive Stage Bridge Ready${reset}`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c3}     \\    /     ${reset}\x1b[90mRelay: \x1b[35mSocket.IO v4 (Zero-Latency Relay)\x1b[0m`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c2}      \\  /      ${reset}\x1b[90mSecurity: \x1b[36mStage Session Lock Active\x1b[0m`
+      )
+    );
+    out.push(
+      this.formatRow(
+        `${c1}       \\/       ${reset}\x1b[90mPress \x1b[1m[L]\x1b[0;90m Copy LAN  │  Press \x1b[1m[C]\x1b[0;90m Copy Cloud Link\x1b[0m`
       )
     );
     out.push(`╠${border}╣`);
