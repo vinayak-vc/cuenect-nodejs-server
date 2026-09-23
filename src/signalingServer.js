@@ -41,6 +41,7 @@ const RELAYABLE_EVENTS = new Set([
   "StereoSettingsActionKey",
   "hologram-display-mode-action",
   "hologram-environment-action",
+  "hologram-model-transform",
   "control-lock-state",
   "hologram-asset-list",
   "hologram-asset-progress",
@@ -173,6 +174,24 @@ class SignalingServer {
               uptimeSeconds: Math.round(process.uptime()),
               publicUrl: this.publicTunnelUrl || null,
               localIp: getMachineIPAddresses()[0] || "127.0.0.1"
+            })
+          );
+          return;
+        }
+
+        if (pathname === "/api/connection-info") {
+          const ips = getMachineIPAddresses();
+          const localIp = ips[0] || "127.0.0.1";
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              localIp,
+              localIps: ips,
+              port: this.port,
+              protocol: "http",
+              localUrl: `http://${localIp}:${this.port}`,
+              publicUrl: this.publicTunnelUrl || null,
+              isTunnel: Boolean(this.publicTunnelUrl)
             })
           );
           return;
@@ -448,12 +467,17 @@ class SignalingServer {
           this.dashboard.addUser(username);
         }
 
+        const localIps = getMachineIPAddresses();
+        const primaryLocalIp = localIps[0] || "127.0.0.1";
         socket.emit("login_response", {
           success: true,
           users: Array.from(this.activeSocketIOUsers.values()),
           serverInfo: {
-            localIp: getMachineIPAddresses()[0] || "127.0.0.1",
+            localIp: primaryLocalIp,
+            localIps: localIps,
             port: this.port,
+            localUrl: `http://${primaryLocalIp}:${this.port}`,
+            publicUrl: this.publicTunnelUrl || null,
             isTunnel: Boolean(this.publicTunnelUrl)
           }
         });
@@ -576,6 +600,10 @@ class SignalingServer {
               const presetLabels = ["Void (black)", "Space"];
               const label = payload.presetName || presetLabels[payload.preset] || "unknown";
               this.dashboard.incrementMessage("ENV", `Stage environment: ${label}`);
+              break;
+            }
+            case "hologram-model-transform": {
+              this.dashboard.incrementMessage("TRANSFORM", `Pose: yaw=${Math.round(payload.yaw || 0)}° pitch=${Math.round(payload.pitch || 0)}° scale=${(payload.scale || 1).toFixed(2)}`);
               break;
             }
             default:

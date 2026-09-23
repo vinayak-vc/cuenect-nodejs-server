@@ -32,6 +32,15 @@ async function runTests() {
 
   try {
     // 3a. Test /api/model-info
+    // 3a. Test /api/connection-info
+    const connInfoRes = await fetchJson(`http://127.0.0.1:${testPort}/api/connection-info`);
+    assert.strictEqual(connInfoRes.status, 200, "connection-info should return 200");
+    assert(connInfoRes.data.localIp, "connection-info should have localIp");
+    assert.strictEqual(connInfoRes.data.port, testPort, "connection-info should return correct port");
+    assert(connInfoRes.data.localUrl.startsWith("http://"), "localUrl should start with http://");
+    console.log("  ✔ /api/connection-info returned valid local network configuration");
+
+    // 3b. Test /api/model-info
     const infoRes = await fetchJson(`http://127.0.0.1:${testPort}/api/model-info?file=1_Leather_Jacket.glb`);
     assert.strictEqual(infoRes.status, 200, "model-info should return 200");
     assert.strictEqual(infoRes.data.isLoadable, true, "model-info data should be loadable");
