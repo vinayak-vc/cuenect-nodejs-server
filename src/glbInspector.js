@@ -10,15 +10,51 @@ const path = require("path");
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
 const MAX_TRIANGLE_COUNT = 250000; // 250k triangles
 
-// Known fallback directories where models might live
-const CANDIDATE_DIRS = [
-  path.join(process.env.USERPROFILE || process.env.HOME || "", "Documents", "Cuenect"),
-  path.join(process.env.USERPROFILE || process.env.HOME || "", "Documents", "Cuenect", "models"),
-  "C:\\Unity\\Kayunet\\Assets\\StreamingAssets",
-  path.join(__dirname, "..", "models"),
-  path.join(__dirname, "..", "public", "models"),
-  process.cwd()
-];
+function getCandidateDirs() {
+  const dirs = [];
+  const userProfile = process.env.USERPROFILE || process.env.HOME || "";
+  const oneDrive = process.env.OneDrive || "";
+
+  // 1. OneDrive Documents and Cuenect
+  if (oneDrive) {
+    dirs.push(path.join(oneDrive, "Documents", "Cuenect"));
+    dirs.push(path.join(oneDrive, "Documents", "Cuenect", "models"));
+    dirs.push(path.join(oneDrive, "Documents"));
+  }
+
+  // 2. Scan for any OneDrive folders under userProfile
+  if (userProfile && fs.existsSync(userProfile)) {
+    try {
+      const userEntries = fs.readdirSync(userProfile, { withFileTypes: true });
+      for (const entry of userEntries) {
+        if (entry.isDirectory() && entry.name.toLowerCase().startsWith("onedrive")) {
+          dirs.push(path.join(userProfile, entry.name, "Documents", "Cuenect"));
+          dirs.push(path.join(userProfile, entry.name, "Documents", "Cuenect", "models"));
+          dirs.push(path.join(userProfile, entry.name, "Documents"));
+        }
+      }
+    } catch {}
+  }
+
+  // 3. UserProfile Documents & LocalLow
+  if (userProfile) {
+    dirs.push(path.join(userProfile, "Documents", "Cuenect"));
+    dirs.push(path.join(userProfile, "Documents", "Cuenect", "models"));
+    dirs.push(path.join(userProfile, "Documents"));
+    dirs.push(path.join(userProfile, "AppData", "LocalLow", "ViitorCloud", "Cuenect-Map-Edition", "model"));
+    dirs.push(path.join(userProfile, "AppData", "LocalLow", "ViitorCloud", "Cuenect-Offline", "model"));
+  }
+
+  // 4. Unity project assets & StreamingAssets
+  dirs.push("C:\\Unity\\Kayunet\\Assets\\StreamingAssets");
+
+  // 5. Node server directories
+  dirs.push(path.join(__dirname, "..", "models"));
+  dirs.push(path.join(__dirname, "..", "public", "models"));
+  dirs.push(process.cwd());
+
+  return Array.from(new Set(dirs.filter((d) => d && fs.existsSync(d))));
+}
 
 /**
  * Resolves a model path to an absolute existing file on disk.
@@ -54,7 +90,8 @@ function resolveModelFilePath(rawPath) {
     candidates.push(baseName + ".glb");
   }
 
-  for (const dir of CANDIDATE_DIRS) {
+  const candidateDirs = getCandidateDirs();
+  for (const dir of candidateDirs) {
     for (const fileCandidate of candidates) {
       const fullCandidate = path.join(dir, fileCandidate);
       if (fs.existsSync(fullCandidate)) {

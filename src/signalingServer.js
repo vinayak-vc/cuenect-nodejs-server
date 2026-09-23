@@ -14,7 +14,11 @@ function enrichAssetCatalog(catalog) {
   if (!catalog || !Array.isArray(catalog.assetinformation)) return catalog;
   for (const asset of catalog.assetinformation) {
     const cat = asset.Category !== undefined ? Number(asset.Category) : 0;
-    if (cat === 0 && (asset.ModelPath || asset.AssetName)) {
+    const isGlb = (asset.ModelPath && asset.ModelPath.toLowerCase().includes(".glb")) ||
+                  (asset.AssetName && asset.AssetName.toLowerCase().includes(".glb"));
+    const isModelCategory = cat === 0 || cat === -1 || cat === 1;
+
+    if ((isGlb || isModelCategory) && (asset.ModelPath || asset.AssetName)) {
       const info = inspectGlb(asset.ModelPath || asset.AssetName);
       asset.fileSizeBytes = info.fileSizeBytes;
       asset.fileSizeMB = info.fileSizeMB;
@@ -23,6 +27,7 @@ function enrichAssetCatalog(catalog) {
       asset.meshCount = info.meshCount;
       asset.dimensions = info.dimensions;
       asset.isWebPreviewable = info.isLoadable;
+      asset.isLoadable = info.isLoadable;
       asset.rejectionReason = info.rejectionReason;
     }
   }
@@ -81,42 +86,63 @@ class SignalingServer {
   loadLocalAssetDatabase() {
     try {
       const userProfile = process.env.USERPROFILE || process.env.HOME || "";
-      const dbPath = path.join(userProfile, "Documents", "Cuenect", "CuenectDatabase.json");
-      if (fs.existsSync(dbPath)) {
-        const raw = fs.readFileSync(dbPath, "utf-8");
-        if (raw && raw.trim()) {
-          const parsed = JSON.parse(raw);
-          this.cachedAssets = enrichAssetCatalog(parsed);
-          return;
+      const oneDrive = process.env.OneDrive || "";
+      const candidateDbPaths = [];
+
+      if (oneDrive) {
+        candidateDbPaths.push(path.join(oneDrive, "Documents", "Cuenect", "CuenectDatabase.json"));
+      }
+
+      if (userProfile && fs.existsSync(userProfile)) {
+        try {
+          const userEntries = fs.readdirSync(userProfile, { withFileTypes: true });
+          for (const entry of userEntries) {
+            if (entry.isDirectory() && entry.name.toLowerCase().startsWith("onedrive")) {
+              candidateDbPaths.push(path.join(userProfile, entry.name, "Documents", "Cuenect", "CuenectDatabase.json"));
+            }
+          }
+        } catch {}
+        candidateDbPaths.push(path.join(userProfile, "Documents", "Cuenect", "CuenectDatabase.json"));
+      }
+
+      for (const dbPath of candidateDbPaths) {
+        if (fs.existsSync(dbPath)) {
+          const raw = fs.readFileSync(dbPath, "utf-8");
+          if (raw && raw.trim()) {
+            const parsed = JSON.parse(raw);
+            this.cachedAssets = enrichAssetCatalog(parsed);
+            return;
+          }
         }
       }
 
-      // Default fallback assets list for the 10 fixed clothing models
-      const defaultModels = [
-        { id: "1_Leather_Jacket", name: "Leather Jacket", file: "1_Leather_Jacket.glb" },
-        { id: "2_Materials_Variants_Shoe", name: "Materials Variants Shoe", file: "2_Materials_Variants_Shoe.glb" },
-        { id: "3_ReadyPlayerMe_Outfit", name: "ReadyPlayerMe Outfit", file: "3_ReadyPlayerMe_Outfit.glb" },
-        { id: "4_Vintage_Corset", name: "Vintage Corset", file: "4_Vintage_Corset.glb" },
-        { id: "5_Chronograph_Luxury_Watch", name: "Chronograph Luxury Watch", file: "5_Chronograph_Luxury_Watch.glb" },
-        { id: "6_Designer_Sunglasses", name: "Designer Sunglasses", file: "6_Designer_Sunglasses.glb" },
-        { id: "7_Michelle_Casual_Wear", name: "Michelle Casual Wear", file: "7_Michelle_Casual_Wear.glb" },
-        { id: "8_Venice_Carnival_Mask", name: "Venice Carnival Mask", file: "8_Venice_Carnival_Mask.glb" },
-        { id: "9_Military_Uniform_Soldier", name: "Military Uniform Soldier", file: "9_Military_Uniform_Soldier.glb" },
-        { id: "10_Suit_Cesium_Man", name: "Suit Cesium Man", file: "10_Suit_Cesium_Man.glb" }
-      ];
+      // Fallback: discover only existing models in StreamingAssets or candidate dirs
+      const streamingAssets = "C:\\Unity\\Kayunet\\Assets\\StreamingAssets";
+      let existingFiles = [];
+      if (fs.existsSync(streamingAssets)) {
+        try {
+          existingFiles = fs.readdirSync(streamingAssets).filter((f) => f.toLowerCase().endsWith(".glb"));
+        } catch {}
+      }
 
-      const generated = {
-        assetinformation: defaultModels.map((m) => ({
-          AssetID: m.id,
-          AssetName: m.name,
-          PlaylistName: "Clothing & Wearables",
-          ThumbnailImagePath: "#",
-          ModelPath: m.file,
-          Category: 0
-        }))
-      };
-
-      this.cachedAssets = enrichAssetCatalog(generated);
+      if (existingFiles.length > 0) {
+        const generated = {
+          assetinformation: existingFiles.map((file) => {
+            const id = path.basename(file, ".glb");
+            const cleanName = id.replace(/^\d+_/, "").replace(/_/g, " ");
+            return {
+              AssetID: id,
+              AssetName: cleanName,
+              PlaylistName: "Clothing & Wearables",
+              ThumbnailImagePath: "#",
+              ModelPath: path.join(streamingAssets, file),
+              Category: 0
+            };
+          })
+        };
+        this.cachedAssets = enrichAssetCatalog(generated);
+        return;
+      }
     } catch (e) {}
   }
 
