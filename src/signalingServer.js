@@ -45,6 +45,7 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-camera-orthographic-action",
   "StereoSettingsActionKey",
   "hologram-display-mode-action",
+  "hologram-default-display-mode-action",
   "hologram-environment-action",
   "hologram-model-transform",
   "control-lock-state",
@@ -662,6 +663,12 @@ class SignalingServer {
               const modeLabels = ["2D", "Stereoscopic (SBS)", "HOLO Stereoscopic", "KMAX Stereoscopic"];
               const label = payload.modeName || modeLabels[payload.mode] || "unknown";
               this.dashboard.incrementMessage("DISPLAY", `Display mode: ${label}`);
+              break;
+            }
+            case "hologram-default-display-mode-action": {
+              const modeLabels = ["2D", "Stereoscopic (SBS)", "HOLO Stereoscopic", "KMAX Stereoscopic"];
+              const label = payload.modeName || modeLabels[payload.mode] || "unknown";
+              this.dashboard.incrementMessage("DEFAULT_DISPLAY", `Default display mode: ${label}`);
               break;
             }
             case "hologram-environment-action": {
