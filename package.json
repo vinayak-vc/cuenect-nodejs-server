@@ -1,6 +1,6 @@
 {
   "name": "cuenect-signaling-bridge",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "High-performance Socket.IO signaling relay bridge between Unity Stage and Web controllers",
   "main": "server.js",
   "bin": {

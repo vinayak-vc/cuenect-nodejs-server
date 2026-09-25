@@ -17,10 +17,10 @@ async function main() {
   // 1. Enable standard Windows console text selection so user can freely highlight & copy
   enableWindowsConsoleSelection();
 
-  const localIps = getMachineIPAddresses();
-  const server = new SignalingServer(config.port);
+  const localIps = getMachineIPAddresses(config.host);
+  const server = new SignalingServer(config.port, config.host);
   const tunnelManager = new TunnelManager();
-  const dashboard = new Dashboard(config.port, localIps);
+  const dashboard = new Dashboard(config.port, localIps, null, config.host);
 
   server.setDashboard(dashboard);
 

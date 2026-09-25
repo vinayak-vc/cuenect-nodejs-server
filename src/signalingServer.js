@@ -58,8 +58,9 @@ const RELAYABLE_EVENTS = new Set([
 ]);
 
 class SignalingServer {
-  constructor(port = 9000) {
+  constructor(port = 9000, host = null) {
     this.port = port;
+    this.host = host;
     this.httpServer = null;
     this.io = null;
     this.publicTunnelUrl = null;
@@ -80,7 +81,7 @@ class SignalingServer {
       const socketUrl = this.publicTunnelUrl.replace(/^http:/i, "ws:").replace(/^https:/i, "wss:");
       return `${webBase}?server=${encodeURIComponent(socketUrl)}`;
     }
-    const localIp = getMachineIPAddresses()[0] || "127.0.0.1";
+    const localIp = this.host || getMachineIPAddresses(this.host)[0] || "127.0.0.1";
     return `${webBase}?host=${localIp}&port=${this.port}&usePort=true`;
   }
 
@@ -200,7 +201,7 @@ class SignalingServer {
               activeConnections: this.activeSocketIOUsers.size,
               uptimeSeconds: Math.round(process.uptime()),
               publicUrl: this.publicTunnelUrl || null,
-              localIp: getMachineIPAddresses()[0] || "127.0.0.1"
+              localIp: this.host || getMachineIPAddresses(this.host)[0] || "127.0.0.1"
             })
           );
           return;
@@ -238,8 +239,8 @@ class SignalingServer {
         }
 
         if (pathname === "/api/connection-info") {
-          const ips = getMachineIPAddresses();
-          const localIp = ips[0] || "127.0.0.1";
+          const ips = getMachineIPAddresses(this.host);
+          const localIp = this.host || ips[0] || "127.0.0.1";
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
@@ -401,7 +402,7 @@ class SignalingServer {
               <div class="info">
                 Active Connections: ${this.activeSocketIOUsers.size}<br>
                 Uptime: ${Math.round(process.uptime())}s<br>
-                Local URL: http://${getMachineIPAddresses()[0]}:${this.port}
+                Local URL: http://${this.host || getMachineIPAddresses(this.host)[0]}:${this.port}
                 ${this.publicTunnelUrl ? `<br>Public URL: ${this.publicTunnelUrl}` : ""}
               </div>
             </div>
@@ -530,8 +531,8 @@ class SignalingServer {
           this.dashboard.addUser(username);
         }
 
-        const localIps = getMachineIPAddresses();
-        const primaryLocalIp = localIps[0] || "127.0.0.1";
+        const localIps = getMachineIPAddresses(this.host);
+        const primaryLocalIp = this.host || localIps[0] || "127.0.0.1";
         socket.emit("login_response", {
           success: true,
           users: Array.from(this.activeSocketIOUsers.values()),

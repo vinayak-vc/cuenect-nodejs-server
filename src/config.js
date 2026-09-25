@@ -23,6 +23,7 @@ function resolvePort(raw, source) {
 function parseArgs(args = process.argv.slice(2)) {
   const config = {
     port: resolvePort(process.env.PORT, "PORT environment variable") ?? 9000,
+    host: process.env.HOST || process.env.LAN_IP || null,
     ngrokToken: process.env.NGROK_AUTHTOKEN || null,
     enableNgrok: true, // Default to auto-starting tunnel if token exists
     saveTokenRequested: false,
@@ -41,6 +42,13 @@ function parseArgs(args = process.argv.slice(2)) {
         process.exit(1);
       }
       config.port = resolvePort(val, "--port flag");
+    } else if (arg === "--ip" || arg === "--host") {
+      const val = args[++i];
+      if (val === undefined || val.startsWith("-")) {
+        console.error("Missing IP/host value after --ip flag.");
+        process.exit(1);
+      }
+      config.host = val.trim();
     } else if (arg === "--token" || arg === "-t") {
       const token = args[++i];
       if (!token || token.startsWith("-")) {
@@ -72,6 +80,7 @@ Usage: node server.js [options]
 
 Options:
   -p, --port <number>    Set local server port (default: 9000)
+  --ip, --host <string>  Explicitly specify preferred LAN IP address for QR/web connect
   -t, --token <string>   Set and save ngrok auth token for public tunnel
   --clear-token          Delete saved ngrok auth token and exit
   --tunnel, --ngrok      Enable public ngrok tunnel (default: off)

@@ -19,10 +19,11 @@ function copyToClipboard(text) {
 }
 
 class Dashboard {
-  constructor(port = 9000, localIps = ["127.0.0.1"], publicUrl = null) {
+  constructor(port = 9000, localIps = ["127.0.0.1"], publicUrl = null, preferredHost = null) {
     this.port = port;
     this.localIps = localIps;
     this.publicUrl = publicUrl;
+    this.preferredHost = preferredHost;
     this.startTime = Date.now();
     this.activeUsers = new Set();
     this.events = [];
@@ -43,6 +44,7 @@ class Dashboard {
   }
 
   getPrimaryLanIp() {
+    if (this.preferredHost) return this.preferredHost;
     const first = this.localIps[0];
     if (!first) return "127.0.0.1";
     if (typeof first === "object") return first.address || first.ip || "127.0.0.1";
