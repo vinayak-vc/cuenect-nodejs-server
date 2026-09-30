@@ -423,6 +423,8 @@ class SignalingServer {
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(
                 JSON.stringify({
+                  ok: true,
+                  count: Array.isArray(result?.models) ? result.models.length : 0,
                   ...result,
                   offline: false
                 })
@@ -432,8 +434,10 @@ class SignalingServer {
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(
                 JSON.stringify({
+                  ok: false,
                   models: [],
                   offline: true,
+                  message: err.message || "Unable to reach Smithsonian 3D API",
                   error: err.message || "Unable to reach Smithsonian 3D API",
                   activeDownloads: this.exploreManager.getActiveDownloadsSnapshot()
                 })
@@ -446,6 +450,7 @@ class SignalingServer {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
+              ok: true,
               downloads: this.exploreManager.getActiveDownloadsSnapshot()
             })
           );
@@ -460,23 +465,28 @@ class SignalingServer {
               const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
               const model = body.model || body;
               const initiator = body.initiator || "web";
-              if (!model || !model.id || !model.modelUrl) {
+              const modelId = model?.smithsonianId || model?.id;
+              if (!model || !modelId || !model.modelUrl) {
                 res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ error: "Missing model.id or model.modelUrl" }));
+                res.end(JSON.stringify({ ok: false, error: "Missing model.smithsonianId/id or model.modelUrl" }));
                 return;
               }
+              model.id = modelId;
+              model.smithsonianId = modelId;
               this.triggerExploreDownload(model, initiator);
               res.writeHead(202, { "Content-Type": "application/json" });
               res.end(
                 JSON.stringify({
+                  ok: true,
                   status: "started",
-                  id: model.id,
+                  id: modelId,
+                  smithsonianId: modelId,
                   downloads: this.exploreManager.getActiveDownloadsSnapshot()
                 })
               );
             } catch (err) {
               res.writeHead(400, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ error: err.message || "Invalid JSON body" }));
+              res.end(JSON.stringify({ ok: false, error: err.message || "Invalid JSON body" }));
             }
           });
           return;
@@ -828,7 +838,10 @@ class SignalingServer {
       socket.on("explore-download-start", (payload) => {
         const model = payload?.model || payload;
         const initiator = payload?.initiator || (this.roles.get(socket.id) === "stage" ? "unity" : "web");
-        if (model && model.id && model.modelUrl) {
+        const modelId = model?.smithsonianId || model?.id;
+        if (model && modelId && model.modelUrl) {
+          model.id = modelId;
+          model.smithsonianId = modelId;
           this.triggerExploreDownload(model, initiator);
         }
       });

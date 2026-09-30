@@ -439,6 +439,8 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
 
   return {
     id: packageId,
+    smithsonianId: packageId,
+    packageUuid: String(packageId).replace(/^3d_package:/i, ""),
     assetId: packageIdToAssetId(packageId),
     title,
     thumbnailUrl,
@@ -609,8 +611,10 @@ class SmithsonianExploreManager {
 
           const isDownloaded =
             downloadedSet.has(parsed.id) || downloadedSet.has(parsed.assetId);
+          const resolvedLocalId = downloadedByAssetId.get(parsed.id) || parsed.assetId;
           parsed.isDownloaded = isDownloaded;
-          parsed.localAssetId = downloadedByAssetId.get(parsed.id) || parsed.assetId;
+          parsed.localAssetId = resolvedLocalId;
+          parsed.downloadedAssetId = isDownloaded ? resolvedLocalId : null;
           return parsed;
         } catch {
           return null;
@@ -620,6 +624,9 @@ class SmithsonianExploreManager {
 
     const validModels = enrichedResults.filter(Boolean).slice(0, count);
     return {
+      ok: true,
+      offline: false,
+      count: validModels.length,
       models: validModels,
       totalCatalogSize: this.cachedTotalRows,
       activeDownloads: this.getActiveDownloadsSnapshot()
@@ -638,11 +645,11 @@ class SmithsonianExploreManager {
     onComplete,
     onError
   }) {
-    if (!model || !model.id || !model.modelUrl) {
+    const pkgId = model?.smithsonianId || model?.id;
+    if (!model || !pkgId || !model.modelUrl) {
       throw new Error("Invalid model payload for download");
     }
 
-    const pkgId = model.id;
     if (this.activeDownloads.has(pkgId)) {
       const existing = this.activeDownloads.get(pkgId);
       if (existing.status === "downloading") {
@@ -660,6 +667,7 @@ class SmithsonianExploreManager {
 
     const initialState = {
       id: pkgId,
+      smithsonianId: pkgId,
       assetId,
       title: model.title || "Smithsonian 3D Model",
       status: "downloading",
@@ -702,6 +710,7 @@ class SmithsonianExploreManager {
             lastEmitPct = pct;
             const state = {
               id: pkgId,
+              smithsonianId: pkgId,
               assetId,
               title: model.title || "Smithsonian 3D Model",
               status: "downloading",
@@ -758,6 +767,7 @@ class SmithsonianExploreManager {
 
       const doneState = {
         id: pkgId,
+        smithsonianId: pkgId,
         assetId,
         title: newAsset.AssetName,
         status: "completed",
@@ -782,6 +792,7 @@ class SmithsonianExploreManager {
     } catch (err) {
       const errState = {
         id: pkgId,
+        smithsonianId: pkgId,
         assetId,
         title: model.title || "Smithsonian 3D Model",
         status: "error",
