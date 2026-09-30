@@ -224,7 +224,7 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
   const modelNode = doc.models[0];
   const derivatives = Array.isArray(modelNode.derivatives) ? modelNode.derivatives : [];
 
-  // 1. Choose best GLB model derivative: prefer Web3D Medium -> Web3D Low -> AR -> Web3D High
+  // 1. Choose best GLB model derivative: ALWAYS prefer High quality first (High -> Medium -> Low -> AR)
   const glbDerivatives = [];
   for (const d of derivatives) {
     if (!Array.isArray(d.assets)) continue;
@@ -232,7 +232,7 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
       if (a.uri && a.uri.toLowerCase().endsWith(".glb")) {
         glbDerivatives.push({
           usage: d.usage || "Web3D",
-          quality: d.quality || "Medium",
+          quality: d.quality || "High",
           uri: a.uri,
           byteSize: Number(a.byteSize) || 0,
           numFaces: Number(a.numFaces) || 0,
@@ -244,14 +244,13 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
 
   if (glbDerivatives.length === 0) return null;
 
-  // Sort preference: Medium (<=25MB) -> Low -> AR -> High
-  const qualityPriority = { Medium: 1, Low: 2, AR: 3, High: 4, Thumb: 5 };
+  // Sort preference: High -> Medium -> Low -> AR -> Thumb
+  const qualityPriority = { High: 1, Medium: 2, Low: 3, AR: 4, Thumb: 5 };
   glbDerivatives.sort((a, b) => {
-    const aUnderLimit = a.byteSize > 0 && a.byteSize <= 25 * 1024 * 1024 ? 0 : 10;
-    const bUnderLimit = b.byteSize > 0 && b.byteSize <= 25 * 1024 * 1024 ? 0 : 10;
-    const aScore = aUnderLimit + (qualityPriority[a.quality] || 6);
-    const bScore = bUnderLimit + (qualityPriority[b.quality] || 6);
-    return aScore - bScore;
+    const aScore = qualityPriority[a.quality] || 6;
+    const bScore = qualityPriority[b.quality] || 6;
+    if (aScore !== bScore) return aScore - bScore;
+    return (b.byteSize || 0) - (a.byteSize || 0);
   });
 
   const chosenModel = glbDerivatives[0];
@@ -259,9 +258,9 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
     ? chosenModel.uri
     : `${SI_DOC_BASE}/${packageId}/${chosenModel.uri}`;
 
-  // 2. Choose best Thumbnail derivative: prefer Image2D Medium -> Low -> Thumb
+  // 2. Choose best Thumbnail derivative: prefer Image2D High/Medium -> Low -> Thumb
   let thumbUri = null;
-  const imagePriority = ["Medium", "Low", "Thumb", "High"];
+  const imagePriority = ["High", "Medium", "Low", "Thumb"];
   for (const q of imagePriority) {
     const found = derivatives.find(
       (d) =>
@@ -281,9 +280,11 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
   if (!thumbUri && Array.isArray(doc.metas)) {
     for (const m of doc.metas) {
       if (Array.isArray(m.images) && m.images.length > 0) {
-        const med = m.images.find((img) => img.quality === "Medium" || img.quality === "Low") || m.images[0];
-        if (med && med.uri) {
-          thumbUri = med.uri;
+        const bestImg =
+          m.images.find((img) => img.quality === "High" || img.quality === "Medium" || img.quality === "Low") ||
+          m.images[0];
+        if (bestImg && bestImg.uri) {
+          thumbUri = bestImg.uri;
           break;
         }
       }
@@ -314,18 +315,61 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
     }
   }
 
-  // 4. Parse EDAN metadata from metas
+  // Extract 3D annotations / hotspot titles if present on the model node
+  let annotations = "";
+  if (Array.isArray(modelNode.annotations) && modelNode.annotations.length > 0) {
+    const annTitles = modelNode.annotations
+      .map((a) => {
+        if (!a) return "";
+        if (typeof a.title === "string" && a.title.trim()) return a.title.trim();
+        if (a.titles && typeof a.titles.EN === "string" && a.titles.EN.trim()) return a.titles.EN.trim();
+        return "";
+      })
+      .filter(Boolean);
+    if (annTitles.length > 0) {
+      annotations = Array.from(new Set(annTitles)).join(" · ");
+    }
+  }
+
+  // 4. Parse EDAN curatorial metadata from metas (no auto-generated technical fallback)
   let title = fallbackTitle || "Smithsonian 3D Artifact";
   let museum = "Smithsonian Institution";
   let creator = "";
   let date = "";
   let collection = "";
+  let place = "";
+  let medium = "";
   let dimensions = computedDimensions;
+  let creditLine = "";
+  let identifier = "";
+  let taxonomy = "";
   let description = "";
   let edanRecordId = "";
+  const details = [];
+  const seenDetails = new Set();
+
+  const pushDetail = (label, value) => {
+    const cleanLabel = String(label || "").trim();
+    const cleanValue = String(value || "").trim();
+    if (!cleanLabel || !cleanValue) return;
+    if (/^https?:\/\//i.test(cleanValue) || /\.glb\b/i.test(cleanValue)) return;
+    const key = `${cleanLabel.toLowerCase()}::${cleanValue.toLowerCase()}`;
+    if (seenDetails.has(key)) return;
+    seenDetails.add(key);
+    details.push({ label: cleanLabel, value: cleanValue });
+  };
 
   if (Array.isArray(doc.metas)) {
     for (const meta of doc.metas) {
+      if (Array.isArray(meta.articles) && meta.articles.length > 0 && !annotations) {
+        const artTitles = meta.articles
+          .map((art) => (art?.title || art?.titles?.EN || "").trim())
+          .filter(Boolean);
+        if (artTitles.length > 0) {
+          annotations = Array.from(new Set(artTitles)).join(" · ");
+        }
+      }
+
       if (meta.collection) {
         if (meta.collection.title && meta.collection.title.trim()) {
           title = meta.collection.title.trim();
@@ -354,57 +398,146 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
             const freetext = edan.content?.freetext || {};
             const indexed = edan.content?.indexedStructured || {};
 
-            // Creator / Maker / Collector / Taxon
+            // Creator / Artist / Collector / Taxon Author
             if (Array.isArray(freetext.name) && freetext.name.length > 0) {
-              creator = freetext.name.map((n) => n.content).filter(Boolean).slice(0, 2).join(", ");
+              creator = freetext.name
+                .map((n) => {
+                  const lbl = (n.label || "").trim();
+                  const cnt = (n.content || "").trim();
+                  if (!cnt) return "";
+                  return lbl && !/^(maker|creator|name)$/i.test(lbl) ? `${lbl}: ${cnt}` : cnt;
+                })
+                .filter(Boolean)
+                .join(" · ");
             } else if (Array.isArray(indexed.name) && indexed.name.length > 0) {
-              creator = indexed.name.slice(0, 2).join(", ");
+              creator = indexed.name.filter(Boolean).join(", ");
             }
 
-            // Date
+            // Date / Period / Age
             if (Array.isArray(freetext.date) && freetext.date.length > 0) {
-              date = freetext.date[0].content || "";
+              date = freetext.date.map((d) => d.content).filter(Boolean).join(" · ");
             } else if (Array.isArray(indexed.date) && indexed.date.length > 0) {
-              date = indexed.date[0] || "";
+              date = indexed.date.filter(Boolean).join(" · ");
             }
 
-            // Collection / Object Type
-            if (Array.isArray(freetext.objectType) && freetext.objectType.length > 0) {
-              collection = freetext.objectType.map((o) => o.content).filter(Boolean).join(" · ");
-            } else if (Array.isArray(freetext.setName) && freetext.setName.length > 0) {
-              collection = freetext.setName[0].content || "";
-            } else if (Array.isArray(indexed.object_type) && indexed.object_type.length > 0) {
-              collection = indexed.object_type.slice(0, 2).join(" · ");
-            } else if (Array.isArray(indexed.scientific_name) && indexed.scientific_name.length > 0) {
-              collection = indexed.scientific_name[0] || "";
+            // Object Type / Collection / Scientific Name
+            const collectionParts = [];
+            if (Array.isArray(freetext.objectType)) {
+              for (const o of freetext.objectType) {
+                if (o?.content) collectionParts.push(o.content.trim());
+              }
+            }
+            if (Array.isArray(indexed.scientific_name)) {
+              for (const s of indexed.scientific_name) {
+                if (s && !collectionParts.includes(s.trim())) collectionParts.push(s.trim());
+              }
+            }
+            if (collectionParts.length === 0 && Array.isArray(freetext.setName) && freetext.setName.length > 0) {
+              collectionParts.push(freetext.setName[0].content || "");
+            } else if (collectionParts.length === 0 && Array.isArray(indexed.object_type)) {
+              collectionParts.push(...indexed.object_type.slice(0, 2));
+            }
+            collection = Array.from(new Set(collectionParts.filter(Boolean))).join(" · ");
+
+            // Place / Origin
+            if (Array.isArray(freetext.place) && freetext.place.length > 0) {
+              place = freetext.place.map((p) => p.content).filter(Boolean).join(" · ");
+            } else if (Array.isArray(indexed.place) && indexed.place.length > 0) {
+              place = indexed.place.filter(Boolean).join(", ");
             }
 
-            // Physical Dimensions
+            // Physical Description: Material / Medium vs Measurements / Dimensions
             if (Array.isArray(freetext.physicalDescription) && freetext.physicalDescription.length > 0) {
-              const meas = freetext.physicalDescription.find((p) =>
-                /measurement|dimension/i.test(p.label || "")
-              );
-              if (meas && meas.content) {
-                dimensions = meas.content;
+              const medParts = [];
+              const dimParts = [];
+              for (const p of freetext.physicalDescription) {
+                if (!p || !p.content) continue;
+                const lbl = (p.label || "").trim();
+                if (/measurement|dimension|size/i.test(lbl)) {
+                  dimParts.push(p.content.trim());
+                } else {
+                  medParts.push(p.content.trim());
+                }
+              }
+              if (dimParts.length > 0) {
+                dimensions = dimParts.join(" · ");
+              }
+              if (medParts.length > 0) {
+                medium = medParts.join(" · ");
               }
             }
 
-            // Description / Notes
-            if (Array.isArray(freetext.notes) && freetext.notes.length > 0) {
-              description = freetext.notes
-                .map((n) => n.content)
-                .filter(Boolean)
-                .join(" ");
-            } else if (Array.isArray(freetext.physicalDescription) && freetext.physicalDescription.length > 0) {
-              description = freetext.physicalDescription
-                .map((p) => p.content)
+            // Credit Line / Donor
+            if (Array.isArray(freetext.creditLine) && freetext.creditLine.length > 0) {
+              creditLine = freetext.creditLine.map((c) => c.content).filter(Boolean).join(" · ");
+            }
+
+            // Identifier / Catalog Number
+            if (Array.isArray(freetext.identifier) && freetext.identifier.length > 0) {
+              identifier = freetext.identifier
+                .map((id) => {
+                  const lbl = (id.label || "").trim();
+                  const cnt = (id.content || "").trim();
+                  if (!cnt) return "";
+                  return lbl ? `${lbl}: ${cnt}` : cnt;
+                })
                 .filter(Boolean)
                 .join(" · ");
+            }
+
+            // Taxonomy / Culture / Topics
+            const taxParts = [];
+            for (const k of ["tax_kingdom", "tax_phylum", "tax_class", "tax_order", "tax_family"]) {
+              if (Array.isArray(indexed[k]) && indexed[k].length > 0) {
+                taxParts.push(...indexed[k].filter(Boolean));
+              }
+            }
+            if (taxParts.length === 0 && Array.isArray(indexed.culture) && indexed.culture.length > 0) {
+              taxParts.push(...indexed.culture.filter(Boolean));
+            }
+            if (taxParts.length === 0 && Array.isArray(indexed.topic) && indexed.topic.length > 0) {
+              taxParts.push(...indexed.topic.filter(Boolean).slice(0, 5));
+            }
+            taxonomy = Array.from(new Set(taxParts)).join(" › ");
+
+            // Curatorial Notes / Description (exclude raw URLs and duplicate catalog IDs)
+            if (Array.isArray(freetext.notes) && freetext.notes.length > 0) {
+              const noteParagraphs = [];
+              for (const n of freetext.notes) {
+                if (!n || !n.content) continue;
+                const lbl = (n.label || "").trim();
+                const cnt = n.content.trim();
+                if (/^record link$/i.test(lbl) || /^https?:\/\//i.test(cnt)) continue;
+                if (/^usnm number$/i.test(lbl) && identifier) continue;
+                noteParagraphs.push(cnt);
+              }
+              description = Array.from(new Set(noteParagraphs)).join("\n\n");
+            }
+
+            // Collect all structured freetext entries into `details` for the Full-Screen Popup
+            for (const [sectionKey, entries] of Object.entries(freetext)) {
+              if (!Array.isArray(entries)) continue;
+              for (const entry of entries) {
+                if (!entry || !entry.content) continue;
+                const lbl = (entry.label || sectionKey).trim();
+                if (/^record link$/i.test(lbl)) continue;
+                pushDetail(lbl, entry.content);
+              }
             }
           } catch {}
         }
       }
     }
+  }
+
+  if (dimensions) {
+    pushDetail("Dimensions", dimensions);
+  }
+  if (taxonomy) {
+    pushDetail("Classification / Topic", taxonomy);
+  }
+  if (annotations) {
+    pushDetail("Annotations", annotations);
   }
 
   if (!title || title === "Smithsonian 3D Model" || title === "Smithsonian 3D Artifact") {
@@ -417,19 +550,6 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
     if (cleanedFile && cleanedFile.length > 2) {
       title = cleanedFile.charAt(0).toUpperCase() + cleanedFile.slice(1);
     }
-  }
-
-  // Fallback synthesized description so the bottom-left plaque always has rich context
-  if (!description) {
-    const parts = [`3D digitized artifact from the ${museum}`];
-    if (collection) parts.push(`(${collection})`);
-    if (chosenModel.numFaces > 0) {
-      parts.push(`— ${(chosenModel.numFaces / 1000).toFixed(0)}k triangles`);
-    }
-    if (computedDimensions) {
-      parts.push(`· Scan dimensions: ${computedDimensions}`);
-    }
-    description = parts.join(" ") + ".";
   }
 
   const fileSizeBytes = chosenModel.byteSize || 2 * 1024 * 1024;
@@ -447,7 +567,7 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
     fileSizeBytes,
     fileSizeMB,
     triangleCount: chosenModel.numFaces || 0,
-    quality: chosenModel.quality || "Medium",
+    quality: chosenModel.quality || "High",
     dracoCompressed: true,
     metadata: {
       title,
@@ -455,8 +575,15 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
       creator: creator || "",
       date: date || "",
       collection: collection || "",
+      place: place || "",
+      medium: medium || "",
       dimensions: dimensions || computedDimensions || "",
-      description,
+      creditLine: creditLine || "",
+      identifier: identifier || "",
+      taxonomy: taxonomy || "",
+      annotations: annotations || "",
+      description: description || "",
+      details,
       license: "CC0 1.0 Public Domain",
       sourceUrl: `https://3d.si.edu/object/3d/${packageId}`
     }
@@ -530,9 +657,16 @@ class SmithsonianExploreManager {
     let rawRows = [];
 
     if (cleanQuery) {
-      const searchUrl = `${SI_SEARCH_BASE}?q=${encodeURIComponent(cleanQuery)}&file_type=glb&gltf_orientation_compliant=true&rows=120&start=0`;
+      const searchUrl = `${SI_SEARCH_BASE}?q=${encodeURIComponent(cleanQuery)}&file_type=glb&file_quality=High&gltf_orientation_compliant=true&rows=120&start=0`;
       const res = await fetchJson(searchUrl, 8000);
       rawRows = Array.isArray(res?.rows) ? res.rows : [];
+      if (rawRows.length === 0) {
+        const fallbackRes = await fetchJson(
+          `${SI_SEARCH_BASE}?q=${encodeURIComponent(cleanQuery)}&file_type=glb&gltf_orientation_compliant=true&rows=120&start=0`,
+          8000
+        ).catch(() => ({ rows: [] }));
+        rawRows = Array.isArray(fallbackRes?.rows) ? fallbackRes.rows : [];
+      }
     } else {
       // Sample across diverse Smithsonian museum units + a random global offset so the 10 random models
       // showcase a rich variety (Air & Space, Paleobiology, American History, Art, Design, etc.)
@@ -554,10 +688,10 @@ class SmithsonianExploreManager {
       const randomOffset = Math.floor(Math.random() * maxOffset);
 
       const urls = [
-        `${SI_SEARCH_BASE}?file_type=glb&file_quality=Medium&gltf_orientation_compliant=true&rows=60&start=${randomOffset}`,
+        `${SI_SEARCH_BASE}?file_type=glb&file_quality=High&gltf_orientation_compliant=true&rows=60&start=${randomOffset}`,
         ...pickedUnits.map(
           (unit) =>
-            `${SI_SEARCH_BASE}?file_type=glb&file_quality=Medium&gltf_orientation_compliant=true&owning_unit=${unit}&rows=40&start=0`
+            `${SI_SEARCH_BASE}?file_type=glb&file_quality=High&gltf_orientation_compliant=true&owning_unit=${unit}&rows=40&start=0`
         )
       ];
 

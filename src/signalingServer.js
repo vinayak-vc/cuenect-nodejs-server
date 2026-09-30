@@ -312,7 +312,14 @@ class SignalingServer {
 
       let updatedAny = false;
       for (const asset of list) {
-        if (!asset || !asset.smithsonianId) continue;
+        if (!asset) continue;
+        if (asset.metadata && typeof asset.metadata.description === "string") {
+          if (/^3D digitized artifact from the /i.test(asset.metadata.description.trim())) {
+            asset.metadata.description = "";
+            updatedAny = true;
+          }
+        }
+        if (!asset.smithsonianId) continue;
         const freshMeta = await this.exploreManager.fetchMetadataForPackage(
           asset.smithsonianId,
           asset.AssetName
@@ -327,6 +334,7 @@ class SignalingServer {
         this.saveAssetToDatabase(list[0]);
         if (this.io) {
           this.io.emit("hologram-asset-list", this.cachedAssets);
+          this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
         }
       }
     } catch {}
