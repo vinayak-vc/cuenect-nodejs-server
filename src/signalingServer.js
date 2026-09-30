@@ -269,6 +269,7 @@ class SignalingServer {
           if (raw && raw.trim()) {
             const parsed = JSON.parse(raw);
             this.cachedAssets = enrichAssetCatalog(parsed);
+            this.refreshExistingSmithsonianMetadata();
             return;
           }
         }
@@ -302,6 +303,33 @@ class SignalingServer {
         return;
       }
     } catch (e) {}
+  }
+
+  async refreshExistingSmithsonianMetadata() {
+    try {
+      const list = this.cachedAssets?.assetinformation;
+      if (!Array.isArray(list) || list.length === 0) return;
+
+      let updatedAny = false;
+      for (const asset of list) {
+        if (!asset || !asset.smithsonianId) continue;
+        const freshMeta = await this.exploreManager.fetchMetadataForPackage(
+          asset.smithsonianId,
+          asset.AssetName
+        );
+        if (freshMeta) {
+          asset.metadata = freshMeta;
+          updatedAny = true;
+        }
+      }
+
+      if (updatedAny) {
+        this.saveAssetToDatabase(list[0]);
+        if (this.io) {
+          this.io.emit("hologram-asset-list", this.cachedAssets);
+        }
+      }
+    } catch {}
   }
 
   setDashboard(dashboard) {

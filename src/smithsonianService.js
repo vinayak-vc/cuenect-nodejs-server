@@ -394,14 +394,12 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
               description = freetext.notes
                 .map((n) => n.content)
                 .filter(Boolean)
-                .join(" ")
-                .slice(0, 320);
+                .join(" ");
             } else if (Array.isArray(freetext.physicalDescription) && freetext.physicalDescription.length > 0) {
               description = freetext.physicalDescription
                 .map((p) => p.content)
                 .filter(Boolean)
-                .join(" · ")
-                .slice(0, 280);
+                .join(" · ");
             }
           } catch {}
         }
@@ -454,9 +452,9 @@ function parseDocumentJson(packageId, fallbackTitle, doc) {
     metadata: {
       title,
       museum,
-      creator: creator || museum,
-      date: date || "Smithsonian Archive",
-      collection: collection || "Open Access 3D Collection",
+      creator: creator || "",
+      date: date || "",
+      collection: collection || "",
       dimensions: dimensions || computedDimensions || "",
       description,
       license: "CC0 1.0 Public Domain",
@@ -482,6 +480,21 @@ class SmithsonianExploreManager {
   constructor() {
     this.cachedTotalRows = 3200; // Refined dynamically on first search
     this.activeDownloads = new Map(); // packageId -> progress object
+  }
+
+  /**
+   * Fetches fresh, untruncated metadata from Voyager document.json for a given packageId.
+   */
+  async fetchMetadataForPackage(packageId, fallbackTitle = "") {
+    if (!packageId) return null;
+    try {
+      const docUrl = `${SI_DOC_BASE}/${packageId}/document.json`;
+      const doc = await fetchJson(docUrl, 6000);
+      const parsed = parseDocumentJson(packageId, fallbackTitle, doc);
+      return parsed ? parsed.metadata : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
