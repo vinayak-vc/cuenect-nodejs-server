@@ -6,6 +6,7 @@ const { URL } = require("url");
 const { Server: SocketIOServer } = require("socket.io");
 const { getMachineIPAddresses } = require("./network");
 const { inspectGlb, resolveModelFilePath } = require("./glbInspector");
+const { SmithsonianExploreManager } = require("./smithsonianService");
 
 /**
  * Enriches catalog assets with GLB metadata (file size, triangle count, isWebPreviewable)
@@ -48,6 +49,11 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-default-display-mode-action",
   "hologram-environment-action",
   "hologram-model-transform",
+  "hologram-metadata-action",
+  "explore-download-start",
+  "explore-download-progress",
+  "explore-download-complete",
+  "explore-download-error",
   "control-lock-state",
   "hologram-asset-list",
   "hologram-asset-progress",
@@ -72,7 +78,175 @@ class SignalingServer {
     this.stageSecret = crypto.randomBytes(16).toString("hex");
     this.dashboard = null;
     this.cachedAssets = null;
+    this.exploreManager = new SmithsonianExploreManager();
     this.loadLocalAssetDatabase();
+  }
+
+  getCandidateDbPaths() {
+    const userProfile = process.env.USERPROFILE || process.env.HOME || "";
+    const oneDrive = process.env.OneDrive || "";
+    const candidateDbPaths = [];
+
+    if (oneDrive) {
+      candidateDbPaths.push(path.join(oneDrive, "Documents", "Cuenect", "CuenectDatabase.json"));
+    }
+
+    if (userProfile && fs.existsSync(userProfile)) {
+      try {
+        const userEntries = fs.readdirSync(userProfile, { withFileTypes: true });
+        for (const entry of userEntries) {
+          if (entry.isDirectory() && entry.name.toLowerCase().startsWith("onedrive")) {
+            candidateDbPaths.push(path.join(userProfile, entry.name, "Documents", "Cuenect", "CuenectDatabase.json"));
+          }
+        }
+      } catch {}
+      candidateDbPaths.push(path.join(userProfile, "Documents", "Cuenect", "CuenectDatabase.json"));
+    }
+
+    return Array.from(new Set(candidateDbPaths));
+  }
+
+  getPrimaryModelsDirectory() {
+    const dbPaths = this.getCandidateDbPaths();
+    for (const dbPath of dbPaths) {
+      if (fs.existsSync(dbPath)) {
+        const dir = path.join(path.dirname(dbPath), "models");
+        if (!fs.existsSync(dir)) {
+          try {
+            fs.mkdirSync(dir, { recursive: true });
+          } catch {}
+        }
+        return dir;
+      }
+    }
+    const fallbackBase =
+      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
+    const modelsDir = path.join(fallbackBase, "models");
+    if (!fs.existsSync(modelsDir)) {
+      try {
+        fs.mkdirSync(modelsDir, { recursive: true });
+      } catch {}
+    }
+    return modelsDir;
+  }
+
+  saveAssetToDatabase(newAsset) {
+    if (!this.cachedAssets || !Array.isArray(this.cachedAssets.assetinformation)) {
+      this.cachedAssets = { assetinformation: [] };
+    }
+
+    const list = this.cachedAssets.assetinformation;
+    const idx = list.findIndex(
+      (a) =>
+        a &&
+        (a.AssetID === newAsset.AssetID ||
+          (newAsset.smithsonianId && a.smithsonianId === newAsset.smithsonianId))
+    );
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...newAsset };
+    } else {
+      list.push(newAsset);
+    }
+
+    const dbPaths = this.getCandidateDbPaths();
+    let savedAny = false;
+    const serialized = JSON.stringify({ assetinformation: list }, null, 2);
+
+    for (const dbPath of dbPaths) {
+      if (fs.existsSync(dbPath) || fs.existsSync(path.dirname(dbPath))) {
+        try {
+          const dir = path.dirname(dbPath);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(dbPath, serialized, "utf-8");
+          savedAny = true;
+        } catch {}
+      }
+    }
+
+    if (!savedAny && dbPaths.length > 0) {
+      try {
+        const dir = path.dirname(dbPaths[0]);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(dbPaths[0], serialized, "utf-8");
+      } catch {}
+    }
+  }
+
+  mergeIncomingStageCatalog(incoming) {
+    const enriched = enrichAssetCatalog(incoming);
+    if (!enriched || !Array.isArray(enriched.assetinformation)) {
+      return this.cachedAssets || enriched;
+    }
+
+    const existingList = this.cachedAssets?.assetinformation || [];
+    const byId = new Map();
+    for (const oldItem of existingList) {
+      if (oldItem && oldItem.AssetID) {
+        byId.set(oldItem.AssetID, oldItem);
+      }
+    }
+
+    // Preserve metadata and smithsonianId on assets that Unity echoes back
+    for (const item of enriched.assetinformation) {
+      if (!item || !item.AssetID) continue;
+      const prev = byId.get(item.AssetID);
+      if (prev) {
+        if (!item.metadata && prev.metadata) item.metadata = prev.metadata;
+        if (!item.smithsonianId && prev.smithsonianId) item.smithsonianId = prev.smithsonianId;
+      }
+    }
+
+    // Also keep any newly downloaded Smithsonian models that Unity hasn't reloaded from disk yet
+    const incomingIds = new Set(enriched.assetinformation.map((a) => a?.AssetID).filter(Boolean));
+    for (const oldItem of existingList) {
+      if (oldItem && oldItem.smithsonianId && !incomingIds.has(oldItem.AssetID)) {
+        enriched.assetinformation.push(oldItem);
+      }
+    }
+
+    return enriched;
+  }
+
+  triggerExploreDownload(model, initiator = "web") {
+    const targetDir = this.getPrimaryModelsDirectory();
+    return this.exploreManager
+      .downloadModel({
+        model,
+        initiator,
+        targetDir,
+        onProgress: (state) => {
+          if (this.io) {
+            this.io.emit("explore-download-progress", state);
+          }
+        },
+        onComplete: (doneState) => {
+          if (doneState && doneState.asset) {
+            this.saveAssetToDatabase(doneState.asset);
+          }
+          if (this.dashboard) {
+            this.dashboard.incrementMessage(
+              "EXPLORE",
+              `Downloaded Smithsonian model "${doneState.title}" (${doneState.totalMB} MB)`
+            );
+          }
+          if (this.io) {
+            if (this.cachedAssets) {
+              this.io.emit("hologram-asset-list", this.cachedAssets);
+              this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+            }
+            this.io.emit("explore-download-complete", doneState);
+          }
+        },
+        onError: (errState) => {
+          if (this.dashboard) {
+            this.dashboard.log("ERROR", `Explore download failed for "${errState.title}": ${errState.error}`);
+          }
+          if (this.io) {
+            this.io.emit("explore-download-error", errState);
+          }
+        }
+      })
+      .catch(() => {});
   }
 
   getWebConnectUrl() {
@@ -87,25 +261,7 @@ class SignalingServer {
 
   loadLocalAssetDatabase() {
     try {
-      const userProfile = process.env.USERPROFILE || process.env.HOME || "";
-      const oneDrive = process.env.OneDrive || "";
-      const candidateDbPaths = [];
-
-      if (oneDrive) {
-        candidateDbPaths.push(path.join(oneDrive, "Documents", "Cuenect", "CuenectDatabase.json"));
-      }
-
-      if (userProfile && fs.existsSync(userProfile)) {
-        try {
-          const userEntries = fs.readdirSync(userProfile, { withFileTypes: true });
-          for (const entry of userEntries) {
-            if (entry.isDirectory() && entry.name.toLowerCase().startsWith("onedrive")) {
-              candidateDbPaths.push(path.join(userProfile, entry.name, "Documents", "Cuenect", "CuenectDatabase.json"));
-            }
-          }
-        } catch {}
-        candidateDbPaths.push(path.join(userProfile, "Documents", "Cuenect", "CuenectDatabase.json"));
-      }
+      const candidateDbPaths = this.getCandidateDbPaths();
 
       for (const dbPath of candidateDbPaths) {
         if (fs.existsSync(dbPath)) {
@@ -253,6 +409,76 @@ class SignalingServer {
               isTunnel: Boolean(this.publicTunnelUrl)
             })
           );
+          return;
+        }
+
+        if (pathname === "/api/explore/models" && req.method === "GET") {
+          const searchQ = query.get("q") || "";
+          const count = Math.min(20, Math.max(1, parseInt(query.get("count") || "10", 10) || 10));
+          const existingAssets = this.cachedAssets?.assetinformation || [];
+
+          this.exploreManager
+            .fetchExploreModels({ query: searchQ, count, existingAssets })
+            .then((result) => {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  ...result,
+                  offline: false
+                })
+              );
+            })
+            .catch((err) => {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  models: [],
+                  offline: true,
+                  error: err.message || "Unable to reach Smithsonian 3D API",
+                  activeDownloads: this.exploreManager.getActiveDownloadsSnapshot()
+                })
+              );
+            });
+          return;
+        }
+
+        if (pathname === "/api/explore/downloads" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              downloads: this.exploreManager.getActiveDownloadsSnapshot()
+            })
+          );
+          return;
+        }
+
+        if (pathname === "/api/explore/download" && req.method === "POST") {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(chunk));
+          req.on("end", () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+              const model = body.model || body;
+              const initiator = body.initiator || "web";
+              if (!model || !model.id || !model.modelUrl) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ error: "Missing model.id or model.modelUrl" }));
+                return;
+              }
+              this.triggerExploreDownload(model, initiator);
+              res.writeHead(202, { "Content-Type": "application/json" });
+              res.end(
+                JSON.stringify({
+                  status: "started",
+                  id: model.id,
+                  downloads: this.exploreManager.getActiveDownloadsSnapshot()
+                })
+              );
+            } catch (err) {
+              res.writeHead(400, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: err.message || "Invalid JSON body" }));
+            }
+          });
           return;
         }
 
@@ -599,8 +825,17 @@ class SignalingServer {
         this.broadcastControlState();
       });
 
+      socket.on("explore-download-start", (payload) => {
+        const model = payload?.model || payload;
+        const initiator = payload?.initiator || (this.roles.get(socket.id) === "stage" ? "unity" : "web");
+        if (model && model.id && model.modelUrl) {
+          this.triggerExploreDownload(model, initiator);
+        }
+      });
+
       // Relay only allowed stage events
       socket.onAny((eventName, ...args) => {
+        if (eventName === "explore-download-start") return;
         if (!RELAYABLE_EVENTS.has(eventName)) {
           if (eventName !== "login" && eventName !== "disconnect") {
             if (this.dashboard) this.dashboard.log("WARN", `Dropped non-allowlisted event: "${eventName}"`);
@@ -611,14 +846,34 @@ class SignalingServer {
         const isStage = this.roles.get(socket.id) === "stage";
 
         if (isStage && eventName === "hologram-asset-list") {
-          this.cachedAssets = enrichAssetCatalog(args[0]);
+          this.cachedAssets = this.mergeIncomingStageCatalog(args[0]);
           args[0] = this.cachedAssets;
         } else if (isStage && eventName === "message" && typeof args[0] === "string" && args[0].startsWith("SendingAssets#")) {
           try {
             const jsonPart = args[0].substring(args[0].indexOf("#") + 1);
-            this.cachedAssets = enrichAssetCatalog(JSON.parse(jsonPart));
+            this.cachedAssets = this.mergeIncomingStageCatalog(JSON.parse(jsonPart));
             args[0] = `SendingAssets#${JSON.stringify(this.cachedAssets)}`;
           } catch {}
+        } else if (!isStage && eventName === "message" && typeof args[0] === "string") {
+          if (args[0].startsWith("ReqAsset")) {
+            this.loadLocalAssetDatabase();
+            if (this.cachedAssets) {
+              socket.emit("hologram-asset-list", this.cachedAssets);
+              socket.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+            }
+          } else if (args[0].startsWith("ModelImageRequest#")) {
+            const assetId = args[0].substring(args[0].indexOf("#") + 1).trim();
+            const list = this.cachedAssets?.assetinformation || [];
+            const found = list.find((a) => a && a.AssetID === assetId);
+            if (found && found.ThumbnailImagePath && found.ThumbnailImagePath !== "#" && fs.existsSync(found.ThumbnailImagePath)) {
+              try {
+                const ext = path.extname(found.ThumbnailImagePath).toLowerCase();
+                const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+                const b64 = fs.readFileSync(found.ThumbnailImagePath).toString("base64");
+                socket.emit("message", `ModelImageReceving#${assetId}#data:${mime};base64,${b64}`);
+              } catch {}
+            }
+          }
         }
 
         // Categorize event for friendly dashboard display
