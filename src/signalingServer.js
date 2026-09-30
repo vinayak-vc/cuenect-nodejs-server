@@ -437,8 +437,8 @@ class SignalingServer {
                   ok: false,
                   models: [],
                   offline: true,
-                  message: err.message || "Unable to reach Smithsonian 3D API",
-                  error: err.message || "Unable to reach Smithsonian 3D API",
+                  message: (err.message || "Unable to reach Smithsonian 3D").replace(/\s*API\b/gi, ""),
+                  error: (err.message || "Unable to reach Smithsonian 3D").replace(/\s*API\b/gi, ""),
                   activeDownloads: this.exploreManager.getActiveDownloadsSnapshot()
                 })
               );
