@@ -60,7 +60,13 @@ const RELAYABLE_EVENTS = new Set([
   "qr-code",
   "socket-disconnect",
   "message",
-  "stage-message"
+  "stage-message",
+  "stage-register",
+  "stage-registered",
+  "stage-state-update",
+  "stage-roster-update",
+  "dispatch-command",
+  "get-stages-roster"
 ]);
 
 class SignalingServer {
@@ -72,6 +78,11 @@ class SignalingServer {
     this.publicTunnelUrl = null;
     this.activeSocketIOUsers = new Map();
     this.roles = new Map();
+    // Multi-stage registry:
+    // stages: Map<stageId, { stageId, socketId, displayName, group, online, currentModel, displayMode, lastSeen }>
+    this.stages = new Map();
+    // socketToStageId: Map<socketId, stageId>
+    this.socketToStageId = new Map();
     // Socket id of the controller currently allowed to drive the stage. Null
     // means the stage is unclaimed and the next controller command takes it.
     this.controlHolder = null;
@@ -391,11 +402,19 @@ class SignalingServer {
               protocol: "socket.io",
               port: this.port,
               activeConnections: this.activeSocketIOUsers.size,
+              stagesCount: this.stages.size,
+              onlineStages: Array.from(this.stages.values()).filter((s) => s.online).length,
               uptimeSeconds: Math.round(process.uptime()),
               publicUrl: this.publicTunnelUrl || null,
               localIp: this.host || getMachineIPAddresses(this.host)[0] || "127.0.0.1"
             })
           );
+          return;
+        }
+
+        if (pathname === "/api/stages" || pathname === "/stages") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ stages: this.getStageRoster() }));
           return;
         }
 
@@ -777,6 +796,171 @@ class SignalingServer {
     }
   }
 
+  /**
+   * Get serialized array of all registered stages and their state.
+   */
+  getStageRoster() {
+    return Array.from(this.stages.values()).map((s) => ({
+      stageId: s.stageId,
+      displayName: s.displayName,
+      group: s.group || "Default",
+      online: Boolean(s.online),
+      currentModel: s.currentModel || null,
+      displayMode: s.displayMode || "2D",
+      lastSeen: s.lastSeen || Date.now()
+    }));
+  }
+
+  /**
+   * Broadcast current stage roster to all connected sockets.
+   */
+  broadcastStageRoster() {
+    if (!this.io) return;
+    const roster = this.getStageRoster();
+    this.io.emit("stage-roster-update", { stages: roster });
+  }
+
+  /**
+   * Register or update a Unity stage node with unique stageId, name, and group.
+   */
+  registerStage(socket, payload = {}) {
+    const rawId = payload.stageId || payload.id;
+    const stageId = rawId ? String(rawId).trim() : `stage_${socket.id.substring(0, 5)}`;
+    const displayName = payload.displayName ? String(payload.displayName).trim() : `Stage ${stageId}`;
+    const group = payload.group ? String(payload.group).trim() : "Default";
+
+    // Clean up previous mapping if this socket had a different stageId
+    const prevStageId = this.socketToStageId.get(socket.id);
+    if (prevStageId && prevStageId !== stageId && this.stages.has(prevStageId)) {
+      const prevInfo = this.stages.get(prevStageId);
+      prevInfo.online = false;
+      prevInfo.socketId = null;
+    }
+
+    this.roles.set(socket.id, "stage");
+    this.socketToStageId.set(socket.id, stageId);
+    this.activeSocketIOUsers.set(socket.id, displayName);
+
+    // Join Socket.IO rooms for targeted multicast & broadcast
+    socket.join(`stage:${stageId}`);
+    socket.join("stages:all");
+    if (group) {
+      socket.join(`group:${group}`);
+    }
+
+    const existing = this.stages.get(stageId) || {};
+    const stageInfo = {
+      ...existing,
+      stageId,
+      socketId: socket.id,
+      displayName: displayName || existing.displayName || `Stage ${stageId}`,
+      group: group || existing.group || "Default",
+      online: true,
+      currentModel: payload.currentModel !== undefined ? payload.currentModel : (existing.currentModel || null),
+      displayMode: payload.displayMode !== undefined ? payload.displayMode : (existing.displayMode || "2D"),
+      lastSeen: Date.now()
+    };
+
+    this.stages.set(stageId, stageInfo);
+
+    if (this.dashboard) {
+      this.dashboard.incrementMessage("STAGE", `Stage "${stageInfo.displayName}" (${stageId}) online in [${stageInfo.group}]`);
+    }
+
+    // Acknowledge registration to the stage
+    socket.emit("stage-registered", {
+      success: true,
+      stageId,
+      displayName: stageInfo.displayName,
+      group: stageInfo.group
+    });
+
+    // Deliver QR code / connection info to stage
+    const connectUrl = this.getWebConnectUrl();
+    socket.emit("qr-code", { action: "show", url: connectUrl });
+    socket.emit("message", `QRCodeURL#${connectUrl}`);
+
+    // Broadcast updated roster to all controllers & stages
+    this.broadcastStageRoster();
+    return stageInfo;
+  }
+
+  /**
+   * Update active model, display mode, or metadata for a registered stage.
+   */
+  updateStageState(socket, payload = {}) {
+    const stageId = this.socketToStageId.get(socket.id) || payload.stageId;
+    if (!stageId || !this.stages.has(stageId)) return;
+
+    const info = this.stages.get(stageId);
+    if (payload.currentModel !== undefined) info.currentModel = payload.currentModel;
+    if (payload.displayMode !== undefined) info.displayMode = payload.displayMode;
+    if (payload.displayName !== undefined) info.displayName = payload.displayName;
+    if (payload.group !== undefined) info.group = payload.group;
+    info.lastSeen = Date.now();
+
+    if (this.dashboard && payload.currentModel !== undefined) {
+      this.dashboard.incrementMessage("STAGE", `Stage "${info.displayName}" model: ${payload.currentModel || "none"}`);
+    }
+
+    this.broadcastStageRoster();
+  }
+
+  /**
+   * Dispatch a targeted command to one, many, or all stages.
+   */
+  dispatchTargetedCommand(socket, envelope = {}) {
+    if (!envelope || typeof envelope !== "object") return;
+    const { targets, targetEvent, event, data } = envelope;
+    const eventName = targetEvent || event;
+    if (!eventName || typeof eventName !== "string") return;
+
+    if (!RELAYABLE_EVENTS.has(eventName)) {
+      if (this.dashboard) {
+        this.dashboard.log("WARN", `Dropped non-allowlisted dispatched event: "${eventName}"`);
+      }
+      return;
+    }
+
+    // Merge incoming catalog if asset list is being forwarded
+    if (eventName === "hologram-asset-list" && data) {
+      this.cachedAssets = this.mergeIncomingStageCatalog(data);
+    }
+
+    // Broadcast to ALL stages if targets is "*", "all", or unspecified
+    const isBroadcast =
+      !targets ||
+      targets === "*" ||
+      targets === "all" ||
+      (Array.isArray(targets) && (targets.includes("*") || targets.includes("all")));
+
+    if (isBroadcast) {
+      this.io.to("stages:all").emit(eventName, data);
+      if (this.dashboard) {
+        this.dashboard.incrementMessage("DISPATCH", `Broadcast "${eventName}" to all stages`);
+      }
+      return;
+    }
+
+    // Multicast to targeted stage IDs or group names
+    const targetList = Array.isArray(targets) ? targets : [targets];
+    let broadcaster = this.io;
+    for (const t of targetList) {
+      if (!t || typeof t !== "string") continue;
+      const trimmed = t.trim();
+      if (trimmed.startsWith("stage:") || trimmed.startsWith("group:")) {
+        broadcaster = broadcaster.to(trimmed);
+      } else {
+        broadcaster = broadcaster.to(`stage:${trimmed}`);
+      }
+    }
+    broadcaster.emit(eventName, data);
+
+    if (this.dashboard) {
+      this.dashboard.incrementMessage("DISPATCH", `Routed "${eventName}" to [${targetList.join(", ")}]`);
+    }
+  }
+
   setupSocketIOEvents() {
     this.io.on("connection", (socket) => {
       const clientIp = socket.handshake.address || "127.0.0.1";
@@ -788,10 +972,33 @@ class SignalingServer {
         this.dashboard.addUser(defaultName);
       }
 
+      // ── Multi-Stage Orchestration Listeners ─────────────────────────────
+      socket.on("stage-register", (payload) => {
+        this.registerStage(socket, payload);
+      });
+
+      socket.on("stage-state-update", (payload) => {
+        this.updateStageState(socket, payload);
+      });
+
+      socket.on("dispatch-command", (envelope) => {
+        this.dispatchTargetedCommand(socket, envelope);
+      });
+
+      socket.on("get-stages-roster", (callback) => {
+        const roster = this.getStageRoster();
+        if (typeof callback === "function") {
+          callback({ stages: roster });
+        } else {
+          socket.emit("stage-roster-update", { stages: roster });
+        }
+      });
+      // ────────────────────────────────────────────────────────────────────
+
       socket.on("login", (data) => {
         const username = (typeof data === "string" ? data : (data && data.name)) || defaultName;
         const secret = (typeof data === "object" && data) ? data.secret : undefined;
-        const role = (secret === this.stageSecret || username === "Unity_Stage") ? "stage" : "controller";
+        const role = (secret === this.stageSecret || username === "Unity_Stage" || (data && data.role === "stage")) ? "stage" : "controller";
         this.roles.set(socket.id, role);
 
         if (this.dashboard && this.activeSocketIOUsers.has(socket.id)) {
@@ -805,9 +1012,12 @@ class SignalingServer {
 
         const localIps = getMachineIPAddresses(this.host);
         const primaryLocalIp = this.host || localIps[0] || "127.0.0.1";
+        const stageRoster = this.getStageRoster();
+
         socket.emit("login_response", {
           success: true,
           users: Array.from(this.activeSocketIOUsers.values()),
+          stages: stageRoster,
           serverInfo: {
             localIp: primaryLocalIp,
             localIps: localIps,
@@ -831,18 +1041,28 @@ class SignalingServer {
         this.claimIfSoleController();
         this.broadcastControlState();
 
-        // Deliver catalog only to authenticated controller sockets
-        if (role === "controller" && this.cachedAssets) {
-          socket.emit("hologram-asset-list", this.cachedAssets);
-          const assetStr = typeof this.cachedAssets === "string" ? this.cachedAssets : JSON.stringify(this.cachedAssets);
-          socket.emit("message", `SendingAssets#${assetStr}`);
+        // Deliver catalog and stage roster to controller sockets
+        if (role === "controller") {
+          socket.emit("stage-roster-update", { stages: stageRoster });
+          if (this.cachedAssets) {
+            socket.emit("hologram-asset-list", this.cachedAssets);
+            const assetStr = typeof this.cachedAssets === "string" ? this.cachedAssets : JSON.stringify(this.cachedAssets);
+            socket.emit("message", `SendingAssets#${assetStr}`);
+          }
         }
 
-        // Deliver current QR connection URL to stage
+        // Auto-register legacy or new stage logins
         if (role === "stage") {
-          const connectUrl = this.getWebConnectUrl();
-          socket.emit("qr-code", { action: "show", url: connectUrl });
-          socket.emit("message", `QRCodeURL#${connectUrl}`);
+          const stageId = (data && data.stageId) ? String(data.stageId).trim() : (username === "Unity_Stage" ? `stage_${shortId}` : username);
+          const displayName = (data && data.displayName) ? String(data.displayName).trim() : (username === "Unity_Stage" ? `Stage ${shortId}` : username);
+          const group = (data && data.group) ? String(data.group).trim() : "Default";
+          this.registerStage(socket, {
+            stageId,
+            displayName,
+            group,
+            currentModel: data?.currentModel,
+            displayMode: data?.displayMode
+          });
         }
       });
 
@@ -884,7 +1104,17 @@ class SignalingServer {
 
       // Relay only allowed stage events
       socket.onAny((eventName, ...args) => {
-        if (eventName === "explore-download-start") return;
+        if (
+          eventName === "explore-download-start" ||
+          eventName === "stage-register" ||
+          eventName === "stage-state-update" ||
+          eventName === "dispatch-command" ||
+          eventName === "get-stages-roster" ||
+          eventName === "stage-registered" ||
+          eventName === "stage-roster-update"
+        ) {
+          return;
+        }
         if (!RELAYABLE_EVENTS.has(eventName)) {
           if (eventName !== "login" && eventName !== "disconnect") {
             if (this.dashboard) this.dashboard.log("WARN", `Dropped non-allowlisted event: "${eventName}"`);
@@ -1018,6 +1248,22 @@ class SignalingServer {
         const username = this.activeSocketIOUsers.get(socket.id);
         this.activeSocketIOUsers.delete(socket.id);
         this.roles.delete(socket.id);
+
+        // Stage disconnection handling
+        const stageId = this.socketToStageId.get(socket.id);
+        if (stageId) {
+          this.socketToStageId.delete(socket.id);
+          if (this.stages.has(stageId)) {
+            const info = this.stages.get(stageId);
+            info.online = false;
+            info.socketId = null;
+            info.lastSeen = Date.now();
+            this.broadcastStageRoster();
+            if (this.dashboard) {
+              this.dashboard.incrementMessage("STAGE", `Stage "${info.displayName}" (${stageId}) disconnected`);
+            }
+          }
+        }
 
         // Never leave the stage locked to a socket that is gone.
         if (this.controlHolder === socket.id) {
