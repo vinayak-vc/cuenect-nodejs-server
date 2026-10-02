@@ -205,6 +205,33 @@ async function run() {
     assert.strictEqual(disconnectedS2.online, false, "Stage 2 status should update to online: false");
     console.log("  ✔ Disconnect handling verified: Stage 2 marked offline in controller roster.");
 
+    // 9. Test Hardware Persistent Identity (systemId auto-generation and reconnection)
+    console.log("▶ [Test 9] Testing persistent hardware identity...");
+    const hwStage = createClient(TEST_PORT, "HW-Stage-1");
+    const hwAck1 = await new Promise((resolve) => {
+      hwStage.on("connect", () => {
+        hwStage.emit("stage-register", { systemId: "HW-Kiosk-101" });
+      });
+      hwStage.on("stage-registered", resolve);
+    });
+    assert(hwAck1.stageId, "Should allocate a stageId");
+    assert(hwAck1.displayName, "Should allocate a displayName");
+    hwStage.disconnect();
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Reconnect with same systemId
+    const hwStageRecon = createClient(TEST_PORT, "HW-Stage-2");
+    const hwAck2 = await new Promise((resolve) => {
+      hwStageRecon.on("connect", () => {
+        hwStageRecon.emit("stage-register", { systemId: "HW-Kiosk-101" });
+      });
+      hwStageRecon.on("stage-registered", resolve);
+    });
+    assert.strictEqual(hwAck2.stageId, hwAck1.stageId, "Persistent hardware identity must match on reconnection");
+    assert.strictEqual(hwAck2.displayName, hwAck1.displayName, "Persistent display name must match on reconnection");
+    hwStageRecon.disconnect();
+    console.log(`  ✔ Hardware persistent identity verified: ${hwAck1.systemId} persistently bound to ${hwAck1.stageId} (${hwAck1.displayName}).`);
+
     console.log("\n=============================================");
     console.log("🎉 ALL MULTI-STAGE ORCHESTRATION TESTS PASSED!");
     console.log("=============================================\n");

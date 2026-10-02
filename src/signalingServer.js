@@ -91,6 +91,41 @@ class SignalingServer {
     this.cachedAssets = null;
     this.exploreManager = new SmithsonianExploreManager();
     this.loadLocalAssetDatabase();
+
+    // Hardware/System persistent mapping: systemId -> { stageId, displayName, group }
+    this.systemToStage = new Map();
+    this.stageRegistryFilePath = path.join(__dirname, "..", "config", "stage-registry.json");
+    this.loadSystemRegistry();
+  }
+
+  loadSystemRegistry() {
+    try {
+      if (fs.existsSync(this.stageRegistryFilePath)) {
+        const raw = fs.readFileSync(this.stageRegistryFilePath, "utf8");
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          for (const [sysId, info] of Object.entries(parsed)) {
+            this.systemToStage.set(sysId, info);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[SignalingServer] Could not load stage-registry.json:", err.message);
+    }
+  }
+
+  saveSystemRegistry() {
+    try {
+      const obj = {};
+      for (const [sysId, info] of this.systemToStage.entries()) {
+        obj[sysId] = info;
+      }
+      const dir = path.dirname(this.stageRegistryFilePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(this.stageRegistryFilePath, JSON.stringify(obj, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[SignalingServer] Could not save stage-registry.json:", err.message);
+    }
   }
 
   getCandidateDbPaths() {
@@ -824,10 +859,52 @@ class SignalingServer {
    * Register or update a Unity stage node with unique stageId, name, and group.
    */
   registerStage(socket, payload = {}) {
-    const rawId = payload.stageId || payload.id;
-    const stageId = rawId ? String(rawId).trim() : `stage_${socket.id.substring(0, 5)}`;
-    const displayName = payload.displayName ? String(payload.displayName).trim() : `Stage ${stageId}`;
-    const group = payload.group ? String(payload.group).trim() : "Default";
+    const systemId = payload.systemId ? String(payload.systemId).trim() : null;
+    let stageId = (payload.stageId && payload.stageId !== "stage_01") ? String(payload.stageId).trim() : null;
+    let displayName = (payload.displayName && payload.displayName !== "Stage 01") ? String(payload.displayName).trim() : null;
+    let group = payload.group ? String(payload.group).trim() : "Default";
+
+    // 1. If this physical machine (systemId) is already registered, reuse its persistent identity
+    if (systemId && this.systemToStage.has(systemId)) {
+      const stored = this.systemToStage.get(systemId);
+      stageId = stageId || stored.stageId;
+      displayName = displayName || stored.displayName;
+      group = (group && group !== "Default") ? group : (stored.group || "Default");
+    }
+
+    // 2. If payload has explicit stageId (e.g. from stage_config.json or CLI flags), use it
+    if (!stageId && payload.stageId && payload.stageId.trim().length > 0) {
+      stageId = payload.stageId.trim();
+    }
+
+    // 3. If still unassigned, generate the next sequential stage ID and display name
+    if (!stageId) {
+      let counter = 1;
+      while (true) {
+        const candidate = `stage_${String(counter).padStart(2, "0")}`;
+        const inUseByOther = Array.from(this.systemToStage.entries()).some(
+          ([sys, data]) => data.stageId === candidate && sys !== systemId
+        );
+        if (!inUseByOther) {
+          stageId = candidate;
+          if (!displayName) {
+            displayName = `Stage ${String(counter).padStart(2, "0")}`;
+          }
+          break;
+        }
+        counter++;
+      }
+    }
+
+    if (!displayName) {
+      displayName = `Stage ${stageId}`;
+    }
+
+    // 4. Save persistent mapping for this hardware systemId
+    if (systemId) {
+      this.systemToStage.set(systemId, { stageId, displayName, group });
+      this.saveSystemRegistry();
+    }
 
     // Clean up previous mapping if this socket had a different stageId
     const prevStageId = this.socketToStageId.get(socket.id);
@@ -853,8 +930,9 @@ class SignalingServer {
       ...existing,
       stageId,
       socketId: socket.id,
-      displayName: displayName || existing.displayName || `Stage ${stageId}`,
-      group: group || existing.group || "Default",
+      displayName,
+      group,
+      systemId: systemId || existing.systemId || null,
       online: true,
       currentModel: payload.currentModel !== undefined ? payload.currentModel : (existing.currentModel || null),
       displayMode: payload.displayMode !== undefined ? payload.displayMode : (existing.displayMode || "2D"),
@@ -867,12 +945,13 @@ class SignalingServer {
       this.dashboard.incrementMessage("STAGE", `Stage "${stageInfo.displayName}" (${stageId}) online in [${stageInfo.group}]`);
     }
 
-    // Acknowledge registration to the stage
+    // Acknowledge registration to the stage with assigned identity
     socket.emit("stage-registered", {
       success: true,
       stageId,
       displayName: stageInfo.displayName,
-      group: stageInfo.group
+      group: stageInfo.group,
+      systemId
     });
 
     // Deliver QR code / connection info to stage
