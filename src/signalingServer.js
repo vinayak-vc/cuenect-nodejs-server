@@ -1022,10 +1022,18 @@ class SignalingServer {
     }
 
     // Multicast to targeted stage IDs or group names
-    const targetList = Array.isArray(targets) ? targets : [targets];
+    const targetList = (Array.isArray(targets) ? targets : [targets]).filter(
+      (t) => typeof t === "string" && t.trim().length > 0
+    );
+    if (targetList.length === 0) {
+      if (this.dashboard) {
+        this.dashboard.incrementMessage("DISPATCH", `Dropped "${eventName}" (empty target list)`);
+      }
+      return;
+    }
+
     let broadcaster = this.io;
     for (const t of targetList) {
-      if (!t || typeof t !== "string") continue;
       const trimmed = t.trim();
       if (trimmed.startsWith("stage:") || trimmed.startsWith("group:")) {
         broadcaster = broadcaster.to(trimmed);

@@ -180,6 +180,21 @@ async function run() {
     assert.strictEqual(stage3Resets, 1, "Stage 3 received broadcast");
     console.log("  ✔ Broadcast verified: All 3 stages acted simultaneously.");
 
+    // 6.5. Test Empty Targets Array (targets: []) drops command safely without broadcasting
+    console.log("▶ [Test 6.5] Testing empty targets array (targets: [])...");
+    controller.emit("dispatch-command", {
+      targets: [],
+      targetEvent: "hologram-model-action",
+      data: { action: "reset_transform" }
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    assert.strictEqual(stage1Resets, 1, "Stage 1 should NOT receive command when targets is empty");
+    assert.strictEqual(stage2Resets, 1, "Stage 2 should NOT receive command when targets is empty");
+    assert.strictEqual(stage3Resets, 1, "Stage 3 should NOT receive command when targets is empty");
+    console.log("  ✔ Empty target array verified: No stages commanded when targets is empty.");
+
     // 7. Test Stage State Reporting (stage-state-update)
     console.log("▶ [Test 7] Testing stage state reporting (currentModel sync)...");
     stage1.emit("stage-state-update", {
