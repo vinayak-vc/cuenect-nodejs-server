@@ -48,6 +48,7 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-display-mode-action",
   "hologram-default-display-mode-action",
   "hologram-environment-action",
+  "hologram-quality-tier-action",
   "hologram-model-transform",
   "hologram-metadata-action",
   "explore-download-start",
@@ -1297,6 +1298,12 @@ class SignalingServer {
               const presetLabels = ["Void (black)", "Space"];
               const label = payload.presetName || presetLabels[payload.preset] || "unknown";
               this.dashboard.incrementMessage("ENV", `Stage environment: ${label}`);
+              break;
+            }
+            case "hologram-quality-tier-action": {
+              const tierLabels = ["Very Low", "Low", "Medium", "High", "Ultra", "Custom"];
+              const label = payload.tierName || tierLabels[payload.tier] || "unknown";
+              this.dashboard.incrementMessage("QUALITY", `Graphics quality: ${label}`);
               break;
             }
             case "hologram-model-transform": {
