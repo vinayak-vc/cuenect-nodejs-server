@@ -861,8 +861,8 @@ class SignalingServer {
    */
   registerStage(socket, payload = {}) {
     const systemId = payload.systemId ? String(payload.systemId).trim() : null;
-    let stageId = (payload.stageId && payload.stageId !== "stage_01") ? String(payload.stageId).trim() : null;
-    let displayName = (payload.displayName && payload.displayName !== "Stage 01") ? String(payload.displayName).trim() : null;
+    let stageId = (payload.stageId && payload.stageId.trim().length > 0) ? String(payload.stageId).trim() : null;
+    let displayName = (payload.displayName && payload.displayName.trim().length > 0) ? String(payload.displayName).trim() : null;
     let group = payload.group ? String(payload.group).trim() : "Default";
 
     // 1. If this physical machine (systemId) is already registered, reuse its persistent identity
@@ -1079,6 +1079,19 @@ class SignalingServer {
           callback({ stages: roster });
         } else {
           socket.emit("stage-roster-update", { stages: roster });
+        }
+      });
+
+      socket.on("stage-purge-offline", () => {
+        let changed = false;
+        for (const [sId, s] of this.stages.entries()) {
+          if (!s.online) {
+            this.stages.delete(sId);
+            changed = true;
+          }
+        }
+        if (changed) {
+          this.broadcastStageRoster();
         }
       });
       // ────────────────────────────────────────────────────────────────────
