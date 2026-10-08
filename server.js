@@ -8,19 +8,19 @@ const { getMachineIPAddresses } = require("./src/network");
 const { SignalingServer } = require("./src/signalingServer");
 const { TunnelManager } = require("./src/tunnelManager");
 const { Dashboard } = require("./src/dashboard");
-const { disableWindowsQuickEdit } = require("./src/windowsConsole");
+const { enableWindowsConsoleSelection } = require("./src/windowsConsole");
 
 async function main() {
   // 0. Handle CLI action flags (help, clear-token, save-token) explicitly
   applyTokenActions(config);
 
-  // 1. Disable Windows Console QuickEdit mode to prevent process freeze on click/unfocus
-  disableWindowsQuickEdit();
+  // 1. Enable standard Windows console text selection so user can freely highlight & copy
+  enableWindowsConsoleSelection();
 
-  const localIps = getMachineIPAddresses();
-  const server = new SignalingServer(config.port);
+  const localIps = getMachineIPAddresses(config.host);
+  const server = new SignalingServer(config.port, config.host);
   const tunnelManager = new TunnelManager();
-  const dashboard = new Dashboard(config.port, localIps);
+  const dashboard = new Dashboard(config.port, localIps, null, config.host);
 
   server.setDashboard(dashboard);
 
