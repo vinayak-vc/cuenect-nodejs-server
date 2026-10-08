@@ -144,3 +144,7 @@ vite.config.ts.timestamp-*
 
 # Runtime stage registry
 config/stage-registry.json
+
+# B-009: per-installation stage secret
+config/stage.secret
+stage.secret

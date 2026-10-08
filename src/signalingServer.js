@@ -35,6 +35,68 @@ function enrichAssetCatalog(catalog) {
   return catalog;
 }
 
+/**
+ * Commands that change what the audience sees. While one controller holds the control lock, these from any other
+ * controller are dropped here (B-016). Read-only traffic (catalog refresh, thumbnails, control requests) is not in the
+ * set: an observer can still browse. Keep in step with STAGE_MUTATING_EVENTS in the web client's socketService.ts.
+ */
+const STAGE_MUTATING_EVENTS = new Set([
+  "hologram-asset-action",
+  "hologram-model-action",
+  "hologram-joystick-action",
+  "hologram-video-action",
+  "hologram-action",
+  "hologram-camera-orthographic-action",
+  "StereoSettingsActionKey",
+  "hologram-display-mode-action",
+  "hologram-default-display-mode-action",
+  "hologram-environment-action",
+  "hologram-quality-tier-action",
+  "hologram-model-transform",
+  "hologram-metadata-action"
+]);
+
+/**
+ * Where the stage secret lives so the local Unity stage can read it (B-009): a per-user folder, never the app folder or
+ * Unity's StreamingAssets (those are copied into builds and installers, which would ship one secret to every machine).
+ * Windows: %LOCALAPPDATA%\Cuenect\stage.secret; elsewhere ~/.cuenect/stage.secret. CUENECT_STAGE_SECRET_FILE overrides it.
+ */
+function resolveStageSecretPath() {
+  if (process.env.CUENECT_STAGE_SECRET_FILE) return process.env.CUENECT_STAGE_SECRET_FILE;
+  if (process.platform === "win32" && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, "Cuenect", "stage.secret");
+  }
+  return path.join(require("os").homedir(), ".cuenect", "stage.secret");
+}
+
+/**
+ * The secret a stage must present to be treated as a stage. CUENECT_STAGE_SECRET wins; otherwise a secret saved by an
+ * earlier run is reused (so a remote stage configured with it keeps working across restarts); otherwise a new one is
+ * generated and, when persisting, written readable by the owner only.
+ */
+function loadOrCreateStageSecret(file, persist) {
+  const fromEnv = (process.env.CUENECT_STAGE_SECRET || "").trim();
+  if (fromEnv.length >= 16) return fromEnv;
+  if (persist) {
+    try {
+      const saved = fs.readFileSync(file, "utf8").trim();
+      if (/^[0-9a-f]{32,}$/i.test(saved)) return saved;
+    } catch (err) {
+      // No usable file yet: create one below.
+    }
+  }
+  const created = crypto.randomBytes(24).toString("hex");
+  if (persist) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, created + "\n", { encoding: "utf8", mode: 0o600 });
+    } catch (err) {
+      console.warn("[SignalingServer] Could not save the stage secret to " + file + ": " + err.message);
+    }
+  }
+  return created;
+}
+
 const RELAYABLE_EVENTS = new Set([
   "hologram-asset-action",
   "hologram-model-action",
@@ -51,6 +113,9 @@ const RELAYABLE_EVENTS = new Set([
   "hologram-quality-tier-action",
   "hologram-model-transform",
   "hologram-metadata-action",
+  "stage-diagnostics",
+  "stage-ping",
+  "stage-pong",
   "explore-download-start",
   "explore-download-progress",
   "explore-download-complete",
@@ -71,7 +136,7 @@ const RELAYABLE_EVENTS = new Set([
 ]);
 
 class SignalingServer {
-  constructor(port = 9000, host = null) {
+  constructor(port = 9000, host = null, options = {}) {
     this.port = port;
     this.host = host;
     this.httpServer = null;
@@ -87,7 +152,17 @@ class SignalingServer {
     // Socket id of the controller currently allowed to drive the stage. Null
     // means the stage is unclaimed and the next controller command takes it.
     this.controlHolder = null;
-    this.stageSecret = crypto.randomBytes(16).toString("hex");
+    // B-009. Options: persistStageSecret (default true; tests pass false), stageSecretFile, allowLegacyStageLogin
+    // (accept the old "name is Unity_Stage" / role "stage" login without a secret; off by default, also
+    // CUENECT_ALLOW_LEGACY_STAGE_LOGIN=1), enforceControlLock (B-016, default on; CUENECT_ENFORCE_CONTROL_LOCK=0 turns it off).
+    this.stageSecretFile = options.stageSecretFile || resolveStageSecretPath();
+    this.stageSecret = loadOrCreateStageSecret(this.stageSecretFile, options.persistStageSecret !== false);
+    this.allowLegacyStageLogin = options.allowLegacyStageLogin !== undefined
+      ? Boolean(options.allowLegacyStageLogin)
+      : process.env.CUENECT_ALLOW_LEGACY_STAGE_LOGIN === "1";
+    this.enforceControlLock = options.enforceControlLock !== undefined
+      ? Boolean(options.enforceControlLock)
+      : process.env.CUENECT_ENFORCE_CONTROL_LOCK !== "0";
     this.dashboard = null;
     this.cachedAssets = null;
     this.exploreManager = new SmithsonianExploreManager();
@@ -773,6 +848,49 @@ class SignalingServer {
     });
   }
 
+  /** True when the candidate equals the stage secret. Constant-time compare. */
+  isValidStageSecret(candidate) {
+    if (typeof candidate !== "string" || candidate.length === 0) return false;
+    const given = Buffer.from(candidate);
+    const expected = Buffer.from(this.stageSecret);
+    return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  }
+
+  /** A socket may act as a stage when it logged in with the secret, presents it now, or legacy logins are allowed. */
+  isStageAuthorised(socket, payload) {
+    return (
+      this.roles.get(socket.id) === "stage" ||
+      this.isValidStageSecret(payload && payload.secret) ||
+      this.allowLegacyStageLogin
+    );
+  }
+
+  warn(message) {
+    if (this.dashboard) {
+      this.dashboard.log("WARN", message);
+    } else {
+      console.warn("[SignalingServer] " + message);
+    }
+  }
+
+  /**
+   * B-016. True when this stage-mutating command must be dropped: another controller holds the lock. Stages are never
+   * blocked, and an unclaimed stage (no holder) stays open to everyone, so a reload or a crashed operator cannot lock the
+   * stage for good.
+   */
+  isBlockedByControlLock(socket, eventName) {
+    if (!this.enforceControlLock) return false;
+    if (!STAGE_MUTATING_EVENTS.has(eventName)) return false;
+    if (this.roles.get(socket.id) === "stage") return false;
+    if (this.controlHolder === null || this.controlHolder === socket.id) return false;
+    return true;
+  }
+
+  rejectBlockedCommand(socket, eventName) {
+    this.warn(`Dropped "${eventName}" from ${this.activeSocketIOUsers.get(socket.id) || socket.id}: control is held by another operator`);
+    this.sendControlState(socket.id);
+  }
+
   /**
    * A single operator should never have to ask themselves for permission.
    * If exactly one controller is connected, it owns the stage - this also
@@ -821,15 +939,30 @@ class SignalingServer {
     }
 
     for (const [id] of this.roles.entries()) {
-      const target = this.io.sockets.sockets.get(id);
-      if (!target) continue;
-      target.emit("control-lock-state", {
-        holderName,
-        youHaveControl: id === this.controlHolder,
-        locked: this.controlHolder !== null,
-        operators
-      });
+      this.sendControlState(id, holderName, operators);
     }
+  }
+
+  /** One socket's view of the lock. */
+  sendControlState(id, holderName, operators) {
+    const target = this.io.sockets.sockets.get(id);
+    if (!target) return;
+    if (holderName === undefined) {
+      holderName = this.controlHolder ? this.activeSocketIOUsers.get(this.controlHolder) || null : null;
+    }
+    if (operators === undefined) {
+      operators = [];
+      for (const [opId, role] of this.roles.entries()) {
+        if (role !== "controller") continue;
+        operators.push({ name: this.activeSocketIOUsers.get(opId) || "operator", hasControl: opId === this.controlHolder });
+      }
+    }
+    target.emit("control-lock-state", {
+      holderName,
+      youHaveControl: id === this.controlHolder,
+      locked: this.controlHolder !== null,
+      operators
+    });
   }
 
   /**
@@ -860,6 +993,11 @@ class SignalingServer {
    * Register or update a Unity stage node with unique stageId, name, and group.
    */
   registerStage(socket, payload = {}) {
+    // B-009: only a socket that proved it is a stage may register as one.
+    if (!this.isStageAuthorised(socket, payload)) {
+      this.warn(`Refused stage-register from ${socket.handshake && socket.handshake.address || "unknown"}: no valid stage secret`);
+      return null;
+    }
     const systemId = payload.systemId ? String(payload.systemId).trim() : null;
     let stageId = (payload.stageId && payload.stageId.trim().length > 0) ? String(payload.stageId).trim() : null;
     let displayName = (payload.displayName && payload.displayName.trim().length > 0) ? String(payload.displayName).trim() : null;
@@ -1002,6 +1140,11 @@ class SignalingServer {
       return;
     }
 
+    if (this.isBlockedByControlLock(socket, eventName)) {
+      this.rejectBlockedCommand(socket, eventName);
+      return;
+    }
+
     // Merge incoming catalog if asset list is being forwarded
     if (eventName === "hologram-asset-list" && data) {
       this.cachedAssets = this.mergeIncomingStageCatalog(data);
@@ -1099,7 +1242,12 @@ class SignalingServer {
       socket.on("login", (data) => {
         const username = (typeof data === "string" ? data : (data && data.name)) || defaultName;
         const secret = (typeof data === "object" && data) ? data.secret : undefined;
-        const role = (secret === this.stageSecret || username === "Unity_Stage" || (data && data.role === "stage")) ? "stage" : "controller";
+        const claimsStage = username === "Unity_Stage" || Boolean(data && typeof data === "object" && data.role === "stage");
+        const secretOk = this.isValidStageSecret(secret);
+        const role = (secretOk || (claimsStage && this.allowLegacyStageLogin)) ? "stage" : "controller";
+        if (claimsStage && role !== "stage") {
+          this.warn(`Login as "${username}" claimed the stage role without a valid secret; treated as a controller`);
+        }
         this.roles.set(socket.id, role);
 
         if (this.dashboard && this.activeSocketIOUsers.has(socket.id)) {
@@ -1224,6 +1372,17 @@ class SignalingServer {
         }
 
         const isStage = this.roles.get(socket.id) === "stage";
+
+        // B-015: health reports and ping answers come from the stage only; a controller must not be able to put numbers
+        // on another controller's diagnostics screen.
+        if ((eventName === "stage-diagnostics" || eventName === "stage-pong") && !isStage) {
+          return;
+        }
+
+        if (this.isBlockedByControlLock(socket, eventName)) {
+          this.rejectBlockedCommand(socket, eventName);
+          return;
+        }
 
         if (isStage && eventName === "hologram-asset-list") {
           this.cachedAssets = this.mergeIncomingStageCatalog(args[0]);

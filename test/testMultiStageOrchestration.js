@@ -45,7 +45,7 @@ function createClient(port, name = "Client") {
 async function run() {
   const TEST_PORT = 9222;
   console.log(`▶ [Test Setup] Starting SignalingServer on port ${TEST_PORT}...`);
-  const server = new SignalingServer(TEST_PORT);
+  const server = new SignalingServer(TEST_PORT, null, { persistStageSecret: false });
   await server.start();
   console.log("  ✔ Server started successfully.");
 
@@ -82,19 +82,19 @@ async function run() {
     ]);
 
     // Register stages with unique IDs and groups
-    stage1.emit("stage-register", {
+    stage1.emit("stage-register", { secret: server.stageSecret,
       stageId: "stage_01",
       displayName: "Stage 1 (Left Screen)",
       group: "Front Row"
     });
 
-    stage2.emit("stage-register", {
+    stage2.emit("stage-register", { secret: server.stageSecret,
       stageId: "stage_02",
       displayName: "Stage 2 (Center Screen)",
       group: "Front Row"
     });
 
-    stage3.emit("stage-register", {
+    stage3.emit("stage-register", { secret: server.stageSecret,
       stageId: "stage_03",
       displayName: "Stage 3 (Right Screen)",
       group: "Back Row"
@@ -225,7 +225,7 @@ async function run() {
     const hwStage = createClient(TEST_PORT, "HW-Stage-1");
     const hwAck1 = await new Promise((resolve) => {
       hwStage.on("connect", () => {
-        hwStage.emit("stage-register", { systemId: "HW-Kiosk-101" });
+        hwStage.emit("stage-register", { secret: server.stageSecret, systemId: "HW-Kiosk-101" });
       });
       hwStage.on("stage-registered", resolve);
     });
@@ -238,7 +238,7 @@ async function run() {
     const hwStageRecon = createClient(TEST_PORT, "HW-Stage-2");
     const hwAck2 = await new Promise((resolve) => {
       hwStageRecon.on("connect", () => {
-        hwStageRecon.emit("stage-register", { systemId: "HW-Kiosk-101" });
+        hwStageRecon.emit("stage-register", { secret: server.stageSecret, systemId: "HW-Kiosk-101" });
       });
       hwStageRecon.on("stage-registered", resolve);
     });
