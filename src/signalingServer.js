@@ -842,7 +842,26 @@ class SignalingServer {
         }
 
         // Cloudflare Workers AI Flux-1-Schnell Proxy Endpoint
-        if (pathname === "/api/ai/generate-flux" && req.method === "POST") {
+        if (pathname === "/api/ai/generate-flux") {
+          const corsHeaders = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Range, ngrok-skip-browser-warning, Authorization, X-Requested-With, If-None-Match, If-Modified-Since, *",
+            "Content-Type": "application/json"
+          };
+
+          if (req.method === "OPTIONS") {
+            res.writeHead(204, corsHeaders);
+            res.end();
+            return;
+          }
+
+          if (req.method !== "POST") {
+            res.writeHead(405, corsHeaders);
+            res.end(JSON.stringify({ ok: false, error: "Method Not Allowed" }));
+            return;
+          }
+
           const chunks = [];
           req.on("data", (chunk) => chunks.push(chunk));
           req.on("end", async () => {
@@ -851,27 +870,31 @@ class SignalingServer {
               const prompt = body.prompt || "A soft pastel background with clean center";
               const steps = body.steps || 4;
 
-              // Helper to resolve env vars from process.env or .env files
+              // Helper to resolve env vars from process.env, execution dir, or known locations
               const getLocalEnv = (key) => {
                 if (process.env[key]) return process.env[key];
                 const envFiles = [
-                  path.join(__dirname, "..", ".env"),
-                  path.join(__dirname, "..", "..", "cuenect-webfront-offline", ".env")
+                  path.join(process.cwd(), ".env"),
+                  path.join(process.cwd(), "..", "cuenect-webfront-offline", ".env"),
+                  "C:\\ReactApp\\cuenect-webfront-offline\\.env",
+                  "C:\\ReactApp\\cuenect-nodejs-server\\.env"
                 ];
                 for (const ef of envFiles) {
-                  if (fs.existsSync(ef)) {
-                    const lines = fs.readFileSync(ef, "utf-8").split("\n");
-                    for (const l of lines) {
-                      const tr = l.trim();
-                      if (tr.startsWith(`${key}=`)) return tr.substring(key.length + 1).trim();
+                  try {
+                    if (fs.existsSync(ef)) {
+                      const lines = fs.readFileSync(ef, "utf-8").split("\n");
+                      for (const l of lines) {
+                        const tr = l.trim();
+                        if (tr.startsWith(`${key}=`)) return tr.substring(key.length + 1).trim();
+                      }
                     }
-                  }
+                  } catch {}
                 }
                 return "";
               };
 
-              const accountId = getLocalEnv("CF_ACCOUNT_ID") || getLocalEnv("VITE_CF_ACCOUNT_ID") || process.env.CF_ACCOUNT_ID || "";
-              const apiToken = getLocalEnv("CF_API_TOKEN") || getLocalEnv("VITE_CF_API_TOKEN") || process.env.CF_API_TOKEN || "";
+              const accountId = body.accountId || getLocalEnv("CF_ACCOUNT_ID") || getLocalEnv("VITE_CF_ACCOUNT_ID") || process.env.CF_ACCOUNT_ID || "";
+              const apiToken = body.apiToken || getLocalEnv("CF_API_TOKEN") || getLocalEnv("VITE_CF_API_TOKEN") || process.env.CF_API_TOKEN || "";
 
               const targetUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`;
               const fetchHeaders = {
@@ -887,7 +910,7 @@ class SignalingServer {
 
               if (!cfRes.ok) {
                 const errText = await cfRes.text();
-                res.writeHead(cfRes.status, { "Content-Type": "application/json" });
+                res.writeHead(cfRes.status, corsHeaders);
                 res.end(JSON.stringify({ ok: false, error: `Cloudflare returned status ${cfRes.status}: ${errText}` }));
                 return;
               }
@@ -911,10 +934,10 @@ class SignalingServer {
                 dataURI = `data:image/jpeg;base64,${b64}`;
               }
 
-              res.writeHead(200, { "Content-Type": "application/json" });
+              res.writeHead(200, corsHeaders);
               res.end(JSON.stringify({ ok: true, dataURI }));
             } catch (err) {
-              res.writeHead(500, { "Content-Type": "application/json" });
+              res.writeHead(500, corsHeaders);
               res.end(JSON.stringify({ ok: false, error: err.message || "Failed to generate image via Cloudflare" }));
             }
           });
@@ -1010,9 +1033,11 @@ class SignalingServer {
                 fileSizeBytes: fileBuffer.length,
                 fileSizeMB: Number((fileBuffer.length / (1024 * 1024)).toFixed(2)),
                 smithsonianId: "",
+                templateId: body.templateId || (body.projectData && body.projectData.id) || null,
                 metadata: {
                   title: body.assetName || baseName,
                   description: body.description || (category === 0 ? "3D Model Asset" : category === 2 ? "Video Asset" : "Graphic Asset"),
+                  templateId: body.templateId || (body.projectData && body.projectData.id) || null,
                   projectFile: projectPath,
                   width: body.width,
                   height: body.height
