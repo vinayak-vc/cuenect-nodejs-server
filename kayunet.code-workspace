@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../cuenect-webfront-offline"
+		},
+		{
+			"path": "../../Unity/Kayunet/Assets/Games/hologram-stage-viewer-application"
+		}
+	],
+	"settings": {}
+}

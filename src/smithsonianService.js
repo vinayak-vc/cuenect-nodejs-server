@@ -959,5 +959,6 @@ class SmithsonianExploreManager {
 
 module.exports = {
   SmithsonianExploreManager,
-  packageIdToAssetId
+  packageIdToAssetId,
+  downloadFileWithProgress
 };

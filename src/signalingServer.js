@@ -2,11 +2,12 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
+const child_process = require("child_process");
 const { URL } = require("url");
 const { Server: SocketIOServer } = require("socket.io");
 const { getMachineIPAddresses } = require("./network");
 const { inspectGlb, resolveModelFilePath } = require("./glbInspector");
-const { SmithsonianExploreManager } = require("./smithsonianService");
+const { SmithsonianExploreManager, downloadFileWithProgress } = require("./smithsonianService");
 
 /**
  * Enriches catalog assets with GLB metadata (file size, triangle count, isWebPreviewable)
@@ -33,6 +34,77 @@ function enrichAssetCatalog(catalog) {
     }
   }
   return catalog;
+}
+
+function getFfmpegPath() {
+  const custom = "C:\\ffmpeg\\bin\\ffmpeg.exe";
+  if (fs.existsSync(custom)) return custom;
+  return "ffmpeg";
+}
+
+function getFfprobePath() {
+  const custom = "C:\\ffmpeg\\bin\\ffprobe.exe";
+  if (fs.existsSync(custom)) return custom;
+  return "ffprobe";
+}
+
+/**
+ * Extracts a middle-frame thumbnail for videos or a smaller-resolution thumbnail for images using ffmpeg.
+ */
+function generateMediaThumbnail(inputPath, category, assetId, targetImagesDir) {
+  if (!inputPath || !fs.existsSync(inputPath)) return null;
+  const ffmpeg = getFfmpegPath();
+  const ffprobe = getFfprobePath();
+  const ext = path.extname(inputPath).toLowerCase();
+  const isVideo = category === 2 || [".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(ext);
+  const isImage = category === 1 || [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"].includes(ext);
+
+  if (!isVideo && !isImage) return null;
+
+  try {
+    if (!fs.existsSync(targetImagesDir)) {
+      fs.mkdirSync(targetImagesDir, { recursive: true });
+    }
+    const outputPath = path.join(targetImagesDir, `${assetId}_thumb.png`);
+
+    if (isVideo) {
+      let seekTime = "1";
+      try {
+        const probeOut = child_process.execFileSync(
+          ffprobe,
+          ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", inputPath],
+          { timeout: 6000, windowsHide: true }
+        ).toString().trim();
+        const duration = parseFloat(probeOut);
+        if (!isNaN(duration) && duration > 0) {
+          seekTime = Math.max(0.1, duration / 2).toFixed(2);
+        }
+      } catch (e) {
+        seekTime = "1";
+      }
+
+      child_process.execFileSync(
+        ffmpeg,
+        ["-y", "-ss", seekTime, "-i", inputPath, "-vframes", "1", "-vf", "scale=min(480\\,iw):-1", "-update", "1", outputPath],
+        { timeout: 12000, windowsHide: true }
+      );
+      if (fs.existsSync(outputPath)) {
+        return outputPath;
+      }
+    } else if (isImage) {
+      child_process.execFileSync(
+        ffmpeg,
+        ["-y", "-i", inputPath, "-vf", "scale=min(480\\,iw):-1", "-update", "1", outputPath],
+        { timeout: 8000, windowsHide: true }
+      );
+      if (fs.existsSync(outputPath)) {
+        return outputPath;
+      }
+    }
+  } catch (err) {
+    console.warn("[MediaThumbnail] Failed to generate thumbnail for:", inputPath, err.message);
+  }
+  return null;
 }
 
 /**
@@ -252,10 +324,81 @@ class SignalingServer {
     return modelsDir;
   }
 
+  getPrimaryImagesDirectory() {
+    const dbPaths = this.getCandidateDbPaths();
+    for (const dbPath of dbPaths) {
+      if (fs.existsSync(dbPath)) {
+        const dir = path.join(path.dirname(dbPath), "images");
+        if (!fs.existsSync(dir)) {
+          try {
+            fs.mkdirSync(dir, { recursive: true });
+          } catch {}
+        }
+        return dir;
+      }
+    }
+    const fallbackBase =
+      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
+    const imagesDir = path.join(fallbackBase, "images");
+    if (!fs.existsSync(imagesDir)) {
+      try {
+        fs.mkdirSync(imagesDir, { recursive: true });
+      } catch {}
+    }
+    return imagesDir;
+  }
+
+  getPrimaryVideosDirectory() {
+    const dbPaths = this.getCandidateDbPaths();
+    for (const dbPath of dbPaths) {
+      if (fs.existsSync(dbPath)) {
+        const dir = path.join(path.dirname(dbPath), "videos");
+        if (!fs.existsSync(dir)) {
+          try {
+            fs.mkdirSync(dir, { recursive: true });
+          } catch {}
+        }
+        return dir;
+      }
+    }
+    const fallbackBase =
+      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
+    const videosDir = path.join(fallbackBase, "videos");
+    if (!fs.existsSync(videosDir)) {
+      try {
+        fs.mkdirSync(videosDir, { recursive: true });
+      } catch {}
+    }
+    return videosDir;
+  }
+
+  removeAssetFromDatabase(assetId) {
+    if (!this.cachedAssets || !Array.isArray(this.cachedAssets.assetinformation)) {
+      return false;
+    }
+    const list = this.cachedAssets.assetinformation;
+    const initialLen = list.length;
+    this.cachedAssets.assetinformation = list.filter((a) => a && a.AssetID !== assetId);
+    if (this.cachedAssets.assetinformation.length === initialLen) return false;
+
+    const dbPaths = this.getCandidateDbPaths();
+    const serialized = JSON.stringify({ assetinformation: this.cachedAssets.assetinformation }, null, 2);
+    for (const dbPath of dbPaths) {
+      if (fs.existsSync(dbPath)) {
+        try {
+          fs.writeFileSync(dbPath, serialized, "utf-8");
+        } catch {}
+      }
+    }
+    return true;
+  }
+
   saveAssetToDatabase(newAsset) {
     if (!this.cachedAssets || !Array.isArray(this.cachedAssets.assetinformation)) {
       this.cachedAssets = { assetinformation: [] };
     }
+
+    newAsset.createdAt = newAsset.createdAt || Date.now();
 
     const list = this.cachedAssets.assetinformation;
     const idx = list.findIndex(
@@ -267,7 +410,8 @@ class SignalingServer {
     if (idx >= 0) {
       list[idx] = { ...list[idx], ...newAsset };
     } else {
-      list.push(newAsset);
+      // Latest added asset is placed at top
+      list.unshift(newAsset);
     }
 
     const dbPaths = this.getCandidateDbPaths();
@@ -381,6 +525,44 @@ class SignalingServer {
     return `${webBase}?host=${localIp}&port=${this.port}&usePort=true`;
   }
 
+  ensureMediaThumbnails(catalog) {
+    if (!catalog || !Array.isArray(catalog.assetinformation)) return;
+    const imagesDir = this.getPrimaryImagesDirectory();
+    let updatedAny = false;
+    for (const asset of catalog.assetinformation) {
+      if (!asset) continue;
+      const cat = asset.Category !== undefined ? Number(asset.Category) : 0;
+      const mPath = asset.ModelPath || "";
+      const ext = path.extname(mPath).toLowerCase();
+      const isVid = cat === 2 || [".mp4", ".mov", ".avi", ".webm"].includes(ext);
+      const isImg = cat === 1 || [".png", ".jpg", ".jpeg", ".webp"].includes(ext);
+
+      if ((isVid || isImg) && mPath && fs.existsSync(mPath)) {
+        const hasValidCustomThumb = asset.ThumbnailImagePath &&
+          asset.ThumbnailImagePath !== "#" &&
+          asset.ThumbnailImagePath !== mPath &&
+          fs.existsSync(asset.ThumbnailImagePath);
+
+        if (!hasValidCustomThumb) {
+          const generated = generateMediaThumbnail(mPath, isVid ? 2 : 1, asset.AssetID, imagesDir);
+          if (generated) {
+            asset.ThumbnailImagePath = generated;
+            updatedAny = true;
+          }
+        }
+      }
+    }
+    if (updatedAny) {
+      const dbPaths = this.getCandidateDbPaths();
+      const serialized = JSON.stringify({ assetinformation: catalog.assetinformation }, null, 2);
+      for (const p of dbPaths) {
+        if (fs.existsSync(p)) {
+          try { fs.writeFileSync(p, serialized, "utf-8"); } catch {}
+        }
+      }
+    }
+  }
+
   loadLocalAssetDatabase() {
     try {
       const candidateDbPaths = this.getCandidateDbPaths();
@@ -390,6 +572,7 @@ class SignalingServer {
           const raw = fs.readFileSync(dbPath, "utf-8");
           if (raw && raw.trim()) {
             const parsed = JSON.parse(raw);
+            this.ensureMediaThumbnails(parsed);
             this.cachedAssets = enrichAssetCatalog(parsed);
             this.refreshExistingSmithsonianMetadata();
             return;
@@ -655,6 +838,469 @@ class SignalingServer {
               res.end(JSON.stringify({ ok: false, error: err.message || "Invalid JSON body" }));
             }
           });
+          return;
+        }
+
+        // Cloudflare Workers AI Flux-1-Schnell Proxy Endpoint
+        if (pathname === "/api/ai/generate-flux" && req.method === "POST") {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(chunk));
+          req.on("end", async () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+              const prompt = body.prompt || "A soft pastel background with clean center";
+              const steps = body.steps || 4;
+
+              // Helper to resolve env vars from process.env or .env files
+              const getLocalEnv = (key) => {
+                if (process.env[key]) return process.env[key];
+                const envFiles = [
+                  path.join(__dirname, "..", ".env"),
+                  path.join(__dirname, "..", "..", "cuenect-webfront-offline", ".env")
+                ];
+                for (const ef of envFiles) {
+                  if (fs.existsSync(ef)) {
+                    const lines = fs.readFileSync(ef, "utf-8").split("\n");
+                    for (const l of lines) {
+                      const tr = l.trim();
+                      if (tr.startsWith(`${key}=`)) return tr.substring(key.length + 1).trim();
+                    }
+                  }
+                }
+                return "";
+              };
+
+              const accountId = getLocalEnv("CF_ACCOUNT_ID") || getLocalEnv("VITE_CF_ACCOUNT_ID") || process.env.CF_ACCOUNT_ID || "";
+              const apiToken = getLocalEnv("CF_API_TOKEN") || getLocalEnv("VITE_CF_API_TOKEN") || process.env.CF_API_TOKEN || "";
+
+              const targetUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/@cf/black-forest-labs/flux-1-schnell`;
+              const fetchHeaders = {
+                "Authorization": `Bearer ${apiToken}`,
+                "Content-Type": "application/json"
+              };
+
+              const cfRes = await fetch(targetUrl, {
+                method: "POST",
+                headers: fetchHeaders,
+                body: JSON.stringify({ prompt, steps })
+              });
+
+              if (!cfRes.ok) {
+                const errText = await cfRes.text();
+                res.writeHead(cfRes.status, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: `Cloudflare returned status ${cfRes.status}: ${errText}` }));
+                return;
+              }
+
+              const cType = cfRes.headers.get("content-type") || "";
+              let dataURI = "";
+
+              if (cType.includes("application/json")) {
+                const json = await cfRes.json();
+                if (json.dataURI) {
+                  dataURI = json.dataURI;
+                } else if (json.result && json.result.image) {
+                  dataURI = `data:image/jpeg;base64,${json.result.image}`;
+                } else if (json.image) {
+                  dataURI = `data:image/jpeg;base64,${json.image}`;
+                }
+              } else {
+                // Binary JPEG stream directly from Cloudflare REST API
+                const arrayBuf = await cfRes.arrayBuffer();
+                const b64 = Buffer.from(arrayBuf).toString("base64");
+                dataURI = `data:image/jpeg;base64,${b64}`;
+              }
+
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, dataURI }));
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: err.message || "Failed to generate image via Cloudflare" }));
+            }
+          });
+          return;
+        }
+
+        if (pathname === "/api/assets/upload" && req.method === "POST") {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(chunk));
+          req.on("end", () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+              const rawData = body.fileData || body.imageData;
+              if (!rawData) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "Missing fileData or imageData in request body" }));
+                return;
+              }
+
+              const providedFileName = body.fileName || "";
+              let ext = providedFileName ? path.extname(providedFileName).toLowerCase() : "";
+              if (!ext) {
+                if (rawData.startsWith("data:image/jpeg") || rawData.startsWith("data:image/jpg")) ext = ".jpg";
+                else if (rawData.startsWith("data:image/png")) ext = ".png";
+                else if (rawData.startsWith("data:model/gltf-binary")) ext = ".glb";
+                else if (rawData.startsWith("data:video/mp4")) ext = ".mp4";
+                else ext = ".png";
+              }
+
+              // Category mapping: 0 = Model, 1 = Image, 2 = Video
+              let category = body.category !== undefined ? Number(body.category) : -1;
+              if (category === -1) {
+                if (ext === ".glb" || ext === ".gltf" || ext === ".fbx" || ext === ".obj") {
+                  category = 0;
+                } else if (ext === ".mp4" || ext === ".mov" || ext === ".webm" || ext === ".avi") {
+                  category = 2;
+                } else {
+                  category = 1;
+                }
+              }
+
+              let targetDir = this.getPrimaryImagesDirectory();
+              if (category === 0) {
+                targetDir = this.getPrimaryModelsDirectory();
+              } else if (category === 2) {
+                targetDir = this.getPrimaryVideosDirectory();
+              }
+
+              const baseName = (body.assetName || (providedFileName ? path.basename(providedFileName, ext) : "Asset"))
+                .trim()
+                .replace(/[^a-zA-Z0-9_\- ]/g, "")
+                .replace(/\s+/g, "_");
+              const assetId = `${baseName}_${Date.now()}`;
+
+              let base64Clean = rawData;
+              if (base64Clean.includes(",")) {
+                base64Clean = base64Clean.split(",")[1];
+              }
+              const fileBuffer = Buffer.from(base64Clean, "base64");
+              const filePath = path.join(targetDir, `${assetId}${ext}`);
+              fs.writeFileSync(filePath, fileBuffer);
+
+              let thumbPath = "";
+              if (body.thumbnailData) {
+                let rawThumb = body.thumbnailData;
+                if (rawThumb.includes(",")) rawThumb = rawThumb.split(",")[1];
+                thumbPath = path.join(this.getPrimaryImagesDirectory(), `${assetId}_thumb.png`);
+                fs.writeFileSync(thumbPath, Buffer.from(rawThumb, "base64"));
+              } else if (category === 2 || category === 1) {
+                const generatedThumb = generateMediaThumbnail(filePath, category, assetId, this.getPrimaryImagesDirectory());
+                if (generatedThumb) {
+                  thumbPath = generatedThumb;
+                } else if (category === 1) {
+                  thumbPath = filePath;
+                }
+              }
+
+              let projectPath = null;
+              if (body.projectData) {
+                projectPath = path.join(this.getPrimaryImagesDirectory(), `${assetId}_project.json`);
+                fs.writeFileSync(projectPath, JSON.stringify(body.projectData, null, 2), "utf-8");
+              }
+
+              const newAsset = {
+                AssetID: assetId,
+                AssetName: body.assetName || baseName,
+                ThumbnailImagePath: thumbPath,
+                ModelPath: filePath,
+                PlaylistName: body.playlistName || (category === 0 ? "Models" : category === 2 ? "Videos" : "Images"),
+                isloaded: false,
+                videoDuration: category === 2 ? (body.videoDuration || 0) : 0,
+                Category: category,
+                fileSizeBytes: fileBuffer.length,
+                fileSizeMB: Number((fileBuffer.length / (1024 * 1024)).toFixed(2)),
+                smithsonianId: "",
+                metadata: {
+                  title: body.assetName || baseName,
+                  description: body.description || (category === 0 ? "3D Model Asset" : category === 2 ? "Video Asset" : "Graphic Asset"),
+                  projectFile: projectPath,
+                  width: body.width,
+                  height: body.height
+                },
+                isWebPreviewable: true,
+                isLoadable: true
+              };
+
+              if (ext === ".glb") {
+                const info = inspectGlb(filePath);
+                newAsset.fileSizeBytes = info.fileSizeBytes;
+                newAsset.fileSizeMB = info.fileSizeMB;
+                newAsset.triangleCount = info.triangleCount;
+                newAsset.vertexCount = info.vertexCount;
+                newAsset.meshCount = info.meshCount;
+                newAsset.dimensions = info.dimensions;
+                newAsset.isWebPreviewable = info.isLoadable;
+                newAsset.isLoadable = info.isLoadable;
+              }
+
+              this.saveAssetToDatabase(newAsset);
+
+              if (this.io) {
+                if (this.cachedAssets) {
+                  this.io.emit("hologram-asset-list", this.cachedAssets);
+                  this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+                }
+                if (body.loadImmediately) {
+                  const loadPayload = {
+                    uuid: newAsset.AssetID,
+                    title: newAsset.AssetName,
+                    name: newAsset.ModelPath || newAsset.AssetName,
+                    action: newAsset.ModelPath || newAsset.AssetName,
+                    thumb_image: newAsset.ThumbnailImagePath || "",
+                    type: String(newAsset.Category ?? 1),
+                    metadata: newAsset.metadata || null
+                  };
+                  this.io.emit("hologram-asset-action", loadPayload);
+                }
+              }
+
+              if (this.dashboard) {
+                this.dashboard.incrementMessage(
+                  "ASSET",
+                  `Uploaded asset "${newAsset.AssetName}" (${newAsset.fileSizeMB} MB)`
+                );
+              }
+
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, asset: newAsset }));
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: err.message || "Failed to process upload" }));
+            }
+          });
+          return;
+        }
+
+        if (pathname === "/api/assets/download-url" && req.method === "POST") {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(chunk));
+          req.on("end", async () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+              if (!body.url) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "Missing url in request body" }));
+                return;
+              }
+
+              const targetUrl = body.url.trim();
+              let parsedUrl;
+              try {
+                parsedUrl = new URL(targetUrl);
+              } catch {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "Invalid URL" }));
+                return;
+              }
+
+              const urlPathname = parsedUrl.pathname;
+              let ext = path.extname(urlPathname).toLowerCase();
+              if (!ext || ext.length > 5) {
+                ext = body.extension ? `.${body.extension.replace(/^\./, "")}` : ".glb";
+              }
+
+              let category = body.category !== undefined ? Number(body.category) : -1;
+              if (category === -1) {
+                if (ext === ".glb" || ext === ".gltf" || ext === ".fbx" || ext === ".obj") {
+                  category = 0;
+                } else if (ext === ".mp4" || ext === ".mov" || ext === ".webm") {
+                  category = 2;
+                } else {
+                  category = 1;
+                }
+              }
+
+              let targetDir = this.getPrimaryImagesDirectory();
+              if (category === 0) targetDir = this.getPrimaryModelsDirectory();
+              else if (category === 2) targetDir = this.getPrimaryVideosDirectory();
+
+              const baseName = (body.assetName || path.basename(urlPathname, ext) || "RemoteAsset")
+                .trim()
+                .replace(/[^a-zA-Z0-9_\- ]/g, "")
+                .replace(/\s+/g, "_");
+              const assetId = `${baseName}_${Date.now()}`;
+              const filePath = path.join(targetDir, `${assetId}${ext}`);
+
+              const downloadId = `dl_${assetId}`;
+              if (this.io) {
+                this.io.emit("explore-download-progress", {
+                  id: downloadId,
+                  title: body.assetName || baseName,
+                  status: "downloading",
+                  progress: 0,
+                  downloadedMB: "0.0",
+                  totalMB: "0.0"
+                });
+              }
+
+              await downloadFileWithProgress(targetUrl, filePath, 0, (progressState) => {
+                if (this.io) {
+                  this.io.emit("explore-download-progress", {
+                    id: downloadId,
+                    title: body.assetName || baseName,
+                    status: "downloading",
+                    progress: progressState.progress,
+                    downloadedMB: progressState.downloadedMB,
+                    totalMB: progressState.totalMB
+                  });
+                }
+              });
+
+              const stat = fs.statSync(filePath);
+              let thumbPath = "";
+
+              if (body.thumbnailUrl) {
+                try {
+                  thumbPath = path.join(this.getPrimaryImagesDirectory(), `${assetId}_thumb.png`);
+                  await downloadFileWithProgress(body.thumbnailUrl, thumbPath, 0);
+                } catch {
+                  thumbPath = "";
+                }
+              }
+              if (!thumbPath && (category === 2 || category === 1)) {
+                const generatedThumb = generateMediaThumbnail(filePath, category, assetId, this.getPrimaryImagesDirectory());
+                if (generatedThumb) {
+                  thumbPath = generatedThumb;
+                } else if (category === 1) {
+                  thumbPath = filePath;
+                }
+              }
+
+              const newAsset = {
+                AssetID: assetId,
+                AssetName: body.assetName || baseName,
+                ThumbnailImagePath: thumbPath,
+                ModelPath: filePath,
+                PlaylistName: body.playlistName || (category === 0 ? "Models" : category === 2 ? "Videos" : "Images"),
+                isloaded: false,
+                videoDuration: 0,
+                Category: category,
+                fileSizeBytes: stat.size,
+                fileSizeMB: Number((stat.size / (1024 * 1024)).toFixed(2)),
+                smithsonianId: "",
+                metadata: {
+                  title: body.assetName || baseName,
+                  description: `Imported via URL: ${targetUrl}`,
+                  sourceUrl: targetUrl
+                },
+                isWebPreviewable: true,
+                isLoadable: true
+              };
+
+              if (ext === ".glb") {
+                const info = inspectGlb(filePath);
+                newAsset.fileSizeBytes = info.fileSizeBytes;
+                newAsset.fileSizeMB = info.fileSizeMB;
+                newAsset.triangleCount = info.triangleCount;
+                newAsset.vertexCount = info.vertexCount;
+                newAsset.meshCount = info.meshCount;
+                newAsset.dimensions = info.dimensions;
+                newAsset.isWebPreviewable = info.isLoadable;
+                newAsset.isLoadable = info.isLoadable;
+              }
+
+              this.saveAssetToDatabase(newAsset);
+
+              if (this.io) {
+                this.io.emit("explore-download-complete", {
+                  id: downloadId,
+                  title: newAsset.AssetName,
+                  status: "complete",
+                  progress: 100,
+                  asset: newAsset
+                });
+                if (this.cachedAssets) {
+                  this.io.emit("hologram-asset-list", this.cachedAssets);
+                  this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+                }
+                if (body.loadImmediately) {
+                  const loadPayload = {
+                    uuid: newAsset.AssetID,
+                    title: newAsset.AssetName,
+                    name: newAsset.ModelPath || newAsset.AssetName,
+                    action: newAsset.ModelPath || newAsset.AssetName,
+                    thumb_image: newAsset.ThumbnailImagePath || "",
+                    type: String(newAsset.Category ?? 1),
+                    metadata: newAsset.metadata || null
+                  };
+                  this.io.emit("hologram-asset-action", loadPayload);
+                }
+              }
+
+              if (this.dashboard) {
+                this.dashboard.incrementMessage(
+                  "DOWNLOAD",
+                  `Downloaded asset "${newAsset.AssetName}" (${newAsset.fileSizeMB} MB)`
+                );
+              }
+
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, asset: newAsset }));
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: err.message || "Failed to download asset from URL" }));
+            }
+          });
+          return;
+        }
+
+        if (pathname === "/api/assets/delete" && req.method === "POST") {
+          const chunks = [];
+          req.on("data", (chunk) => chunks.push(chunk));
+          req.on("end", () => {
+            try {
+              const body = JSON.parse(Buffer.concat(chunks).toString("utf-8") || "{}");
+              if (!body.assetId) {
+                res.writeHead(400, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: "Missing assetId" }));
+                return;
+              }
+
+              // Optional: delete disk file if requested
+              if (body.deleteFile && this.cachedAssets && Array.isArray(this.cachedAssets.assetinformation)) {
+                const target = this.cachedAssets.assetinformation.find((a) => a && a.AssetID === body.assetId);
+                if (target && target.ModelPath && fs.existsSync(target.ModelPath)) {
+                  try { fs.unlinkSync(target.ModelPath); } catch {}
+                }
+                if (target && target.ThumbnailImagePath && target.ThumbnailImagePath !== target.ModelPath && fs.existsSync(target.ThumbnailImagePath)) {
+                  try { fs.unlinkSync(target.ThumbnailImagePath); } catch {}
+                }
+              }
+
+              const removed = this.removeAssetFromDatabase(body.assetId);
+              if (this.io && this.cachedAssets) {
+                this.io.emit("hologram-asset-list", this.cachedAssets);
+                this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+              }
+
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: true, removed }));
+            } catch (err) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ ok: false, error: err.message || "Failed to delete asset" }));
+            }
+          });
+          return;
+        }
+
+        if (pathname === "/api/asset-file") {
+          const filePathParam = query.get("path") || "";
+          if (!filePathParam || !fs.existsSync(filePathParam)) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "File not found" }));
+            return;
+          }
+          const ext = path.extname(filePathParam).toLowerCase();
+          const mimeTypes = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".json": "application/json",
+            ".glb": "model/gltf-binary"
+          };
+          const contentType = mimeTypes[ext] || "application/octet-stream";
+          res.writeHead(200, { "Content-Type": contentType });
+          fs.createReadStream(filePathParam).pipe(res);
           return;
         }
 
@@ -1404,13 +2050,48 @@ class SignalingServer {
             const assetId = args[0].substring(args[0].indexOf("#") + 1).trim();
             const list = this.cachedAssets?.assetinformation || [];
             const found = list.find((a) => a && a.AssetID === assetId);
-            if (found && found.ThumbnailImagePath && found.ThumbnailImagePath !== "#" && fs.existsSync(found.ThumbnailImagePath)) {
-              try {
-                const ext = path.extname(found.ThumbnailImagePath).toLowerCase();
-                const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
-                const b64 = fs.readFileSync(found.ThumbnailImagePath).toString("base64");
-                socket.emit("message", `ModelImageReceving#${assetId}#data:${mime};base64,${b64}`);
-              } catch {}
+            if (found) {
+              let tPath = found.ThumbnailImagePath;
+              if ((!tPath || tPath === "#" || !fs.existsSync(tPath)) && found.ModelPath && fs.existsSync(found.ModelPath)) {
+                const cat = found.Category !== undefined ? Number(found.Category) : 0;
+                const ext = path.extname(found.ModelPath).toLowerCase();
+                const isVid = cat === 2 || [".mp4", ".mov", ".avi", ".webm"].includes(ext);
+                const isImg = cat === 1 || [".png", ".jpg", ".jpeg", ".webp"].includes(ext);
+                if (isVid || isImg) {
+                  const gen = generateMediaThumbnail(found.ModelPath, isVid ? 2 : 1, found.AssetID, this.getPrimaryImagesDirectory());
+                  if (gen) {
+                    found.ThumbnailImagePath = gen;
+                    tPath = gen;
+                  }
+                }
+              }
+              if (tPath && tPath !== "#" && fs.existsSync(tPath)) {
+                try {
+                  const ext = path.extname(tPath).toLowerCase();
+                  const mime = ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : "image/png";
+                  const b64 = fs.readFileSync(tPath).toString("base64");
+                  socket.emit("message", `ModelImageReceving#${assetId}#data:${mime};base64,${b64}`);
+                } catch {}
+              }
+            }
+          }
+        } else if (eventName === "delete-asset") {
+          const payload = args[0] || {};
+          const assetId = payload.assetId || payload.id;
+          if (assetId) {
+            if (payload.deleteFile !== false && this.cachedAssets && Array.isArray(this.cachedAssets.assetinformation)) {
+              const target = this.cachedAssets.assetinformation.find((a) => a && a.AssetID === assetId);
+              if (target && target.ModelPath && fs.existsSync(target.ModelPath)) {
+                try { fs.unlinkSync(target.ModelPath); } catch {}
+              }
+              if (target && target.ThumbnailImagePath && target.ThumbnailImagePath !== target.ModelPath && fs.existsSync(target.ThumbnailImagePath)) {
+                try { fs.unlinkSync(target.ThumbnailImagePath); } catch {}
+              }
+            }
+            this.removeAssetFromDatabase(assetId);
+            if (this.io && this.cachedAssets) {
+              this.io.emit("hologram-asset-list", this.cachedAssets);
+              this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
             }
           }
         }

@@ -7,8 +7,8 @@
 const fs = require("fs");
 const path = require("path");
 
-const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
-const MAX_TRIANGLE_COUNT = 250000; // 250k triangles
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
+const MAX_TRIANGLE_COUNT = 750000; // 750k triangles
 
 function getCandidateDirs() {
   const dirs = [];
@@ -172,7 +172,7 @@ function inspectGlb(filePath) {
       meshCount: -1,
       dimensions: null,
       isLoadable: false,
-      rejectionReason: `File size (${fileSizeMB} MB) exceeds maximum limit of 25 MB`
+      rejectionReason: `File size (${fileSizeMB} MB) exceeds maximum limit of 50 MB`
     };
   }
 
