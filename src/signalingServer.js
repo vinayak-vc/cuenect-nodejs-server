@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const http = require("http");
 const crypto = require("crypto");
 const child_process = require("child_process");
@@ -242,7 +243,8 @@ class SignalingServer {
 
     // Hardware/System persistent mapping: systemId -> { stageId, displayName, group }
     this.systemToStage = new Map();
-    this.stageRegistryFilePath = path.join(__dirname, "..", "config", "stage-registry.json");
+    const baseConfigDir = process.pkg ? path.dirname(process.execPath) : path.join(__dirname, "..");
+    this.stageRegistryFilePath = path.join(baseConfigDir, "config", "stage-registry.json");
     this.loadSystemRegistry();
   }
 
@@ -277,99 +279,109 @@ class SignalingServer {
   }
 
   getCandidateDbPaths() {
-    const userProfile = process.env.USERPROFILE || process.env.HOME || "";
+    const home = (typeof os.homedir === "function" ? os.homedir() : "") || process.env.USERPROFILE || process.env.HOME || "";
     const oneDrive = process.env.OneDrive || "";
     const candidateDbPaths = [];
+
+    // macOS Application Support paths (Unity persistentDataPath)
+    if (process.platform === "darwin" && home) {
+      const appSupport = path.join(home, "Library", "Application Support");
+      candidateDbPaths.push(
+        path.join(appSupport, "ViitorCloud", "Kayunet", "Cuenect", "CuenectDatabase.json"),
+        path.join(appSupport, "com.ViitorCloud.Kayunet", "Cuenect", "CuenectDatabase.json"),
+        path.join(appSupport, "Kayunet", "Cuenect", "CuenectDatabase.json")
+      );
+    }
 
     if (oneDrive) {
       candidateDbPaths.push(path.join(oneDrive, "Documents", "Cuenect", "CuenectDatabase.json"));
     }
 
-    if (userProfile && fs.existsSync(userProfile)) {
+    if (home && fs.existsSync(home)) {
       try {
-        const userEntries = fs.readdirSync(userProfile, { withFileTypes: true });
+        const userEntries = fs.readdirSync(home, { withFileTypes: true });
         for (const entry of userEntries) {
           if (entry.isDirectory() && entry.name.toLowerCase().startsWith("onedrive")) {
-            candidateDbPaths.push(path.join(userProfile, entry.name, "Documents", "Cuenect", "CuenectDatabase.json"));
+            candidateDbPaths.push(path.join(home, entry.name, "Documents", "Cuenect", "CuenectDatabase.json"));
           }
         }
       } catch {}
-      candidateDbPaths.push(path.join(userProfile, "Documents", "Cuenect", "CuenectDatabase.json"));
+      candidateDbPaths.push(path.join(home, "Documents", "Cuenect", "CuenectDatabase.json"));
+      candidateDbPaths.push(path.join(home, "Cuenect", "CuenectDatabase.json"));
     }
+
+    // Also check folder next to executable (never inside pkg snapshot)
+    const execDir = process.pkg ? path.dirname(process.execPath) : path.join(__dirname, "..");
+    candidateDbPaths.push(path.join(execDir, "CuenectDatabase.json"));
 
     return Array.from(new Set(candidateDbPaths));
   }
 
-  getPrimaryModelsDirectory() {
+  getWritableBaseDirectory() {
+    // 1. If an existing database file is found in candidates, use its parent directory
     const dbPaths = this.getCandidateDbPaths();
     for (const dbPath of dbPaths) {
       if (fs.existsSync(dbPath)) {
-        const dir = path.join(path.dirname(dbPath), "models");
-        if (!fs.existsSync(dir)) {
-          try {
-            fs.mkdirSync(dir, { recursive: true });
-          } catch {}
-        }
-        return dir;
+        return path.dirname(dbPath);
       }
     }
-    const fallbackBase =
-      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
-    const modelsDir = path.join(fallbackBase, "models");
-    if (!fs.existsSync(modelsDir)) {
+    // 2. Check candidate directories and see if we can create or write to one
+    for (const dbPath of dbPaths) {
+      const dir = path.dirname(dbPath);
       try {
-        fs.mkdirSync(modelsDir, { recursive: true });
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const testFile = path.join(dir, `.test_write_${Date.now()}`);
+        fs.writeFileSync(testFile, "ok");
+        fs.unlinkSync(testFile);
+        return dir;
       } catch {}
     }
-    return modelsDir;
+    // 3. Fallback to user home
+    const home = (typeof os.homedir === "function" ? os.homedir() : "") || process.env.USERPROFILE || process.env.HOME || "";
+    if (home) {
+      const homeDir = process.platform === "darwin"
+        ? path.join(home, "Library", "Application Support", "ViitorCloud", "Kayunet", "Cuenect")
+        : path.join(home, "Documents", "Cuenect");
+      try {
+        if (!fs.existsSync(homeDir)) fs.mkdirSync(homeDir, { recursive: true });
+        return homeDir;
+      } catch {}
+    }
+    // 4. Executable directory on the real filesystem (never __dirname inside pkg)
+    return process.pkg ? path.dirname(process.execPath) : path.join(__dirname, "..");
+  }
+
+  getPrimaryModelsDirectory() {
+    const base = this.getWritableBaseDirectory();
+    const dir = path.join(base, "models");
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch {}
+    }
+    return dir;
   }
 
   getPrimaryImagesDirectory() {
-    const dbPaths = this.getCandidateDbPaths();
-    for (const dbPath of dbPaths) {
-      if (fs.existsSync(dbPath)) {
-        const dir = path.join(path.dirname(dbPath), "images");
-        if (!fs.existsSync(dir)) {
-          try {
-            fs.mkdirSync(dir, { recursive: true });
-          } catch {}
-        }
-        return dir;
-      }
-    }
-    const fallbackBase =
-      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
-    const imagesDir = path.join(fallbackBase, "images");
-    if (!fs.existsSync(imagesDir)) {
+    const base = this.getWritableBaseDirectory();
+    const dir = path.join(base, "images");
+    if (!fs.existsSync(dir)) {
       try {
-        fs.mkdirSync(imagesDir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true });
       } catch {}
     }
-    return imagesDir;
+    return dir;
   }
 
   getPrimaryVideosDirectory() {
-    const dbPaths = this.getCandidateDbPaths();
-    for (const dbPath of dbPaths) {
-      if (fs.existsSync(dbPath)) {
-        const dir = path.join(path.dirname(dbPath), "videos");
-        if (!fs.existsSync(dir)) {
-          try {
-            fs.mkdirSync(dir, { recursive: true });
-          } catch {}
-        }
-        return dir;
-      }
-    }
-    const fallbackBase =
-      dbPaths[0] ? path.dirname(dbPaths[0]) : path.join(__dirname, "..");
-    const videosDir = path.join(fallbackBase, "videos");
-    if (!fs.existsSync(videosDir)) {
+    const base = this.getWritableBaseDirectory();
+    const dir = path.join(base, "videos");
+    if (!fs.existsSync(dir)) {
       try {
-        fs.mkdirSync(videosDir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true });
       } catch {}
     }
-    return videosDir;
+    return dir;
   }
 
   removeAssetFromDatabase(assetId) {
