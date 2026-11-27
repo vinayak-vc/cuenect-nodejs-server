@@ -319,36 +319,55 @@ class SignalingServer {
   }
 
   getWritableBaseDirectory() {
-    // 1. If an existing database file is found in candidates, use its parent directory
+    const isWritableDir = (dir) => {
+      if (!dir || typeof dir !== "string") return false;
+      // In pkg, any directory matching virtual snapshot mount or project source cannot be written to
+      if (process.pkg && (dir.startsWith("/snapshot") || dir.startsWith("C:\\snapshot") || dir.includes("/**/"))) {
+        return false;
+      }
+      try {
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        const testFile = path.join(dir, `.test_write_${Date.now()}_${Math.random().toString(36).substring(7)}`);
+        fs.writeFileSync(testFile, "ok");
+        fs.unlinkSync(testFile);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    // 1. If an existing database file is found in candidates AND its folder is writable, use it
     const dbPaths = this.getCandidateDbPaths();
     for (const dbPath of dbPaths) {
       if (fs.existsSync(dbPath)) {
-        return path.dirname(dbPath);
+        const dir = path.dirname(dbPath);
+        if (isWritableDir(dir)) {
+          return dir;
+        }
       }
     }
     // 2. Check candidate directories and see if we can create or write to one
     for (const dbPath of dbPaths) {
       const dir = path.dirname(dbPath);
-      try {
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        const testFile = path.join(dir, `.test_write_${Date.now()}`);
-        fs.writeFileSync(testFile, "ok");
-        fs.unlinkSync(testFile);
+      if (isWritableDir(dir)) {
         return dir;
-      } catch {}
+      }
     }
-    // 3. Fallback to user home
+    // 3. Fallback to user home Application Support / Documents
     const home = (typeof os.homedir === "function" ? os.homedir() : "") || process.env.USERPROFILE || process.env.HOME || "";
     if (home) {
       const homeDir = process.platform === "darwin"
         ? path.join(home, "Library", "Application Support", "ViitorCloud", "Kayunet", "Cuenect")
         : path.join(home, "Documents", "Cuenect");
-      try {
-        if (!fs.existsSync(homeDir)) fs.mkdirSync(homeDir, { recursive: true });
-        return homeDir;
-      } catch {}
+      if (isWritableDir(homeDir)) return homeDir;
     }
-    // 4. Executable directory on the real filesystem (never __dirname inside pkg)
+    // 4. Fallback to Documents/Cuenect or temp directory
+    const docFallback = home ? path.join(home, "Documents", "Cuenect") : path.join(os.tmpdir(), "Cuenect");
+    if (isWritableDir(docFallback)) return docFallback;
+
+    const tmpFallback = path.join(os.tmpdir(), "Cuenect");
+    if (isWritableDir(tmpFallback)) return tmpFallback;
+
     return process.pkg ? path.dirname(process.execPath) : path.join(__dirname, "..");
   }
 
@@ -1022,15 +1041,45 @@ class SignalingServer {
                 base64Clean = base64Clean.split(",")[1];
               }
               const fileBuffer = Buffer.from(base64Clean, "base64");
-              const filePath = path.join(targetDir, `${assetId}${ext}`);
-              fs.writeFileSync(filePath, fileBuffer);
+              const safeWriteFile = (targetPath, bufferOrStr, isUtf8 = false) => {
+                try {
+                  const d = path.dirname(targetPath);
+                  if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+                  if (isUtf8) {
+                    fs.writeFileSync(targetPath, bufferOrStr, "utf-8");
+                  } else {
+                    fs.writeFileSync(targetPath, bufferOrStr);
+                  }
+                  return targetPath;
+                } catch (writeErr) {
+                  const fileName = path.basename(targetPath);
+                  const home = (typeof os.homedir === "function" ? os.homedir() : "") || process.env.USERPROFILE || process.env.HOME || "";
+                  const subfolder = path.basename(path.dirname(targetPath));
+                  const fbDir = home
+                    ? (process.platform === "darwin"
+                        ? path.join(home, "Library", "Application Support", "ViitorCloud", "Kayunet", "Cuenect", subfolder)
+                        : path.join(home, "Documents", "Cuenect", subfolder))
+                    : path.join(os.tmpdir(), "Cuenect", subfolder);
+                  if (!fs.existsSync(fbDir)) fs.mkdirSync(fbDir, { recursive: true });
+                  const fbPath = path.join(fbDir, fileName);
+                  if (isUtf8) {
+                    fs.writeFileSync(fbPath, bufferOrStr, "utf-8");
+                  } else {
+                    fs.writeFileSync(fbPath, bufferOrStr);
+                  }
+                  return fbPath;
+                }
+              };
+
+              let filePath = path.join(targetDir, `${assetId}${ext}`);
+              filePath = safeWriteFile(filePath, fileBuffer);
 
               let thumbPath = "";
               if (body.thumbnailData) {
                 let rawThumb = body.thumbnailData;
                 if (rawThumb.includes(",")) rawThumb = rawThumb.split(",")[1];
                 thumbPath = path.join(this.getPrimaryImagesDirectory(), `${assetId}_thumb.png`);
-                fs.writeFileSync(thumbPath, Buffer.from(rawThumb, "base64"));
+                thumbPath = safeWriteFile(thumbPath, Buffer.from(rawThumb, "base64"));
               } else if (category === 2 || category === 1) {
                 const generatedThumb = generateMediaThumbnail(filePath, category, assetId, this.getPrimaryImagesDirectory());
                 if (generatedThumb) {
@@ -1043,7 +1092,7 @@ class SignalingServer {
               let projectPath = null;
               if (body.projectData) {
                 projectPath = path.join(this.getPrimaryImagesDirectory(), `${assetId}_project.json`);
-                fs.writeFileSync(projectPath, JSON.stringify(body.projectData, null, 2), "utf-8");
+                projectPath = safeWriteFile(projectPath, JSON.stringify(body.projectData, null, 2), true);
               }
 
               const newAsset = {
