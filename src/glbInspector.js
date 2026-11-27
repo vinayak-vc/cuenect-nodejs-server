@@ -48,9 +48,10 @@ function getCandidateDirs() {
   // 4. Unity project assets & StreamingAssets
   dirs.push("C:\\Unity\\Kayunet\\Assets\\StreamingAssets");
 
-  // 5. Node server directories
-  dirs.push(path.join(__dirname, "..", "models"));
-  dirs.push(path.join(__dirname, "..", "public", "models"));
+  // 5. Node server directories (never inside pkg snapshot)
+  const baseDir = process.pkg ? path.dirname(process.execPath) : path.join(__dirname, "..");
+  dirs.push(path.join(baseDir, "models"));
+  dirs.push(path.join(baseDir, "public", "models"));
   dirs.push(process.cwd());
 
   return Array.from(new Set(dirs.filter((d) => d && fs.existsSync(d))));

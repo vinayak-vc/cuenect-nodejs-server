@@ -238,6 +238,7 @@ class SignalingServer {
       : process.env.CUENECT_ENFORCE_CONTROL_LOCK !== "0";
     this.dashboard = null;
     this.cachedAssets = null;
+    this.deletedAssetIds = new Set();
     this.exploreManager = new SmithsonianExploreManager();
     this.loadLocalAssetDatabase();
 
@@ -385,6 +386,9 @@ class SignalingServer {
   }
 
   removeAssetFromDatabase(assetId) {
+    if (assetId) {
+      this.deletedAssetIds.add(assetId);
+    }
     if (!this.cachedAssets || !Array.isArray(this.cachedAssets.assetinformation)) {
       return false;
     }
@@ -396,8 +400,10 @@ class SignalingServer {
     const dbPaths = this.getCandidateDbPaths();
     const serialized = JSON.stringify({ assetinformation: this.cachedAssets.assetinformation }, null, 2);
     for (const dbPath of dbPaths) {
-      if (fs.existsSync(dbPath)) {
+      if (fs.existsSync(dbPath) || fs.existsSync(path.dirname(dbPath))) {
         try {
+          const dir = path.dirname(dbPath);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
           fs.writeFileSync(dbPath, serialized, "utf-8");
         } catch {}
       }
@@ -454,6 +460,13 @@ class SignalingServer {
     const enriched = enrichAssetCatalog(incoming);
     if (!enriched || !Array.isArray(enriched.assetinformation)) {
       return this.cachedAssets || enriched;
+    }
+
+    // Filter out any assets that have been deleted
+    if (this.deletedAssetIds && this.deletedAssetIds.size > 0) {
+      enriched.assetinformation = enriched.assetinformation.filter(
+        (a) => a && a.AssetID && !this.deletedAssetIds.has(a.AssetID)
+      );
     }
 
     const existingList = this.cachedAssets?.assetinformation || [];
@@ -2083,6 +2096,7 @@ class SignalingServer {
               socket.emit("hologram-asset-list", this.cachedAssets);
               socket.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
             }
+            return; // Serve authoritative database directly and do NOT broadcast ReqAsset to stage!
           } else if (args[0].startsWith("ModelImageRequest#")) {
             const assetId = args[0].substring(args[0].indexOf("#") + 1).trim();
             const list = this.cachedAssets?.assetinformation || [];
@@ -2129,6 +2143,10 @@ class SignalingServer {
             if (this.io && this.cachedAssets) {
               this.io.emit("hologram-asset-list", this.cachedAssets);
               this.io.emit("message", `SendingAssets#${JSON.stringify(this.cachedAssets)}`);
+              // Inform Unity Stage to immediately drop the asset from in-memory list & scene
+              this.io.emit("message", `DeleteAsset#${assetId}`);
+              this.io.emit("stage-message", `DeleteAsset#${assetId}`);
+              this.io.emit("delete-asset", { assetId });
             }
           }
         }
@@ -2215,6 +2233,13 @@ class SignalingServer {
             default:
               this.dashboard.incrementMessage("RELAY", `Event: "${eventName}"`);
               break;
+          }
+        }
+
+        // Suppress broadcasting catalog queries to avoid flooding Unity Stage
+        if ((eventName === "message" || eventName === "stage-message") && typeof args[0] === "string") {
+          if (args[0].startsWith("ReqAsset")) {
+            return;
           }
         }
 
